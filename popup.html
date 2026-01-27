@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Start Automation</title>
+
+  <style>
+    body {
+      width: 250px;
+      min-height: 200px;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #ff3b3b, #ff6a00);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont;
+    }
+
+    button {
+      width: 100%;
+      background: #ffffff;
+      color: #ff3b3b;
+      border: none;
+      border-radius: 14px;
+      padding: 14px 26px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    button:hover {
+      transform: scale(1.03);
+      box-shadow: 0 14px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    button:active {
+      transform: scale(0.98);
+    }
+
+    #viewData {
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      color: white;
+    }
+
+    .divider {
+      width: 100%;
+      height: 1px;
+      background: rgba(255, 255, 255, 0.3);
+      margin: 5px 0;
+    }
+  </style>
+</head>
+<body>
+  <button id="start">▶ Start</button>
+  <div class="divider"></div>
+  <button id="viewData">📊 View Data</button>
+
+  <script src="popup.js"></script>
+</body>
+</html>

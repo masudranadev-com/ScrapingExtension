@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Seller Data Viewer</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #ff3b3b, #ff6a00);
+      color: white;
+      padding: 30px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 15px;
+    }
+
+    .header h1 {
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .header .stats {
+      display: flex;
+      gap: 20px;
+      font-size: 14px;
+    }
+
+    .stat-item {
+      background: rgba(255, 255, 255, 0.2);
+      padding: 8px 16px;
+      border-radius: 8px;
+      backdrop-filter: blur(10px);
+    }
+
+    .stat-value {
+      font-weight: 700;
+      font-size: 20px;
+    }
+
+    .controls {
+      padding: 20px 30px;
+      background: #f8f9fa;
+      border-bottom: 1px solid #e9ecef;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    .btn-primary {
+      background: #4CAF50;
+      color: white;
+    }
+
+    .btn-secondary {
+      background: #2196F3;
+      color: white;
+    }
+
+    .btn-danger {
+      background: #f44336;
+      color: white;
+    }
+
+    .btn-info {
+      background: #ff9800;
+      color: white;
+    }
+
+    .search-box {
+      flex: 1;
+      min-width: 250px;
+      padding: 10px 16px;
+      border: 2px solid #e9ecef;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+
+    .search-box:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .table-container {
+      overflow-x: auto;
+      max-height: calc(100vh - 300px);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    thead {
+      position: sticky;
+      top: 0;
+      background: #f8f9fa;
+      z-index: 10;
+    }
+
+    th {
+      padding: 15px 20px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      color: #6c757d;
+      border-bottom: 2px solid #dee2e6;
+    }
+
+    td {
+      padding: 15px 20px;
+      border-bottom: 1px solid #e9ecef;
+      font-size: 14px;
+      color: #495057;
+    }
+
+    tbody tr:hover {
+      background: #f8f9fa;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-success {
+      background: #d4edda;
+      color: #155724;
+    }
+
+    .badge-warning {
+      background: #fff3cd;
+      color: #856404;
+    }
+
+    .badge-danger {
+      background: #f8d7da;
+      color: #721c24;
+    }
+
+    .link {
+      color: #2196F3;
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .link:hover {
+      text-decoration: underline;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #6c757d;
+    }
+
+    .empty-state svg {
+      width: 80px;
+      height: 80px;
+      margin-bottom: 20px;
+      opacity: 0.5;
+    }
+
+    .empty-state h3 {
+      font-size: 20px;
+      margin-bottom: 10px;
+      color: #495057;
+    }
+
+    .empty-state p {
+      font-size: 14px;
+    }
+
+    .cell-long {
+      max-width: 300px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cell-long:hover {
+      white-space: normal;
+      overflow: visible;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>📊 Seller Data Viewer</h1>
+      </div>
+      <div class="stats">
+        <div class="stat-item">
+          <div>Total Sellers</div>
+          <div class="stat-value" id="totalCount">0</div>
+        </div>
+        <div class="stat-item">
+          <div>Emails Found</div>
+          <div class="stat-value" id="emailCount">0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <input type="text" id="searchBox" class="search-box" placeholder="🔍 Search by business name, email, or seller ID...">
+      <button class="btn btn-primary" id="downloadJSON">📥 Download JSON</button>
+      <button class="btn btn-secondary" id="downloadCSV">📄 Download CSV</button>
+      <button class="btn btn-info" id="refreshData">🔄 Refresh</button>
+      <button class="btn btn-danger" id="clearData">🗑️ Clear All Data</button>
+    </div>
+
+    <div class="table-container" id="tableContainer">
+      <div class="empty-state" id="emptyState">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
+        </svg>
+        <h3>No Data Yet</h3>
+        <p>Start the automation to collect seller data</p>
+      </div>
+      <table id="dataTable" style="display: none;">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Seller ID</th>
+            <th>Business Name</th>
+            <th>Email</th>
+            <th>Headquarters</th>
+            <th>Store Link</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="viewer.js"></script>
+</body>
+</html>
