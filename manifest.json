@@ -1,11 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "Category Store Clicker",
+  "name": "Target Mail Hunter",
   "version": "1.0",
-  "description": "Automates category navigation and counts stores",
+  "description": "Automates seller email collection from Target marketplace",
 
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["https://www.target.com/*"],
+
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
 
   "content_scripts": [
     {
@@ -15,6 +21,11 @@
   ],
 
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   }
 }
