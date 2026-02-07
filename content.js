@@ -1,4 +1,4 @@
-// --------------------
+﻿// --------------------
 // Global state
 // --------------------
 let shouldStopAutomation = false;
@@ -29,7 +29,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     runAutomation();
   } else if (msg.action === "STOP_AUTOMATION") {
     shouldStopAutomation = true;
-    console.log("🛑 STOP requested by user");
+    console.log("ðŸ›‘ STOP requested by user");
   }
 });
 
@@ -37,29 +37,29 @@ chrome.runtime.onMessage.addListener((msg) => {
 // Main flow
 // --------------------
 async function runAutomation() {
-  console.log("🚀 Automation started");
+  console.log("ðŸš€ Automation started");
 
   // Open Filters
-  console.log("🖱️  Clicking: Filters menu");
+  console.log("ðŸ–±ï¸  Clicking: Filters menu");
   click('[data-test="filters-menu"]');
   await sleep(800);
 
   // Verify modal opened
   const modalOpen = await verifyModalOpen();
   if (!modalOpen) {
-    console.error("❌ Failed to open filters modal. Stopping.");
+    console.error("âŒ Failed to open filters modal. Stopping.");
     return;
   }
 
   // Open Sold by
-  console.log("🖱️  Clicking: Sold by button");
+  console.log("ðŸ–±ï¸  Clicking: Sold by button");
   click('[data-test="facet-group-d_sellers_all"]');
   await sleep(1200);
 
   // Verify seller panel opened
   const sellerPanelOpen = await verifySellerPanelOpen();
   if (!sellerPanelOpen) {
-    console.error("❌ Failed to open seller panel. Stopping.");
+    console.error("âŒ Failed to open seller panel. Stopping.");
     return;
   }
 
@@ -135,7 +135,7 @@ async function getPreviousSellerId() {
 
 async function logSellerDataAsJSON() {
   const data = await getStorage("sellerData", []);
-  console.log("📊 SELLER DATA (JSON):");
+  console.log("ðŸ“Š SELLER DATA (JSON):");
   console.log(JSON.stringify(data, null, 2));
   return data;
 }
@@ -168,94 +168,94 @@ function waitForSelector(selector, timeout = 15000) {
 // Page State Verification
 // --------------------
 async function verifyModalOpen(timeout = 5000) {
-  console.log("🔍 Verifying modal is open...");
+  console.log("ðŸ” Verifying modal is open...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const modal = document.querySelector('div[role="dialog"][aria-modal="true"]');
     if (modal) {
-      console.log("✅ Modal confirmed open");
+      console.log("âœ… Modal confirmed open");
       return true;
     }
     await sleep(200);
   }
-  console.warn("❌ Modal not detected!");
+  console.warn("âŒ Modal not detected!");
   return false;
 }
 
 async function verifySellerPanelOpen(timeout = 5000) {
-  console.log("🔍 Verifying seller panel is open...");
+  console.log("ðŸ” Verifying seller panel is open...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const checkboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
     if (checkboxes.length > 1) {
-      console.log(`✅ Seller panel confirmed open (${checkboxes.length} checkboxes found)`);
+      console.log(`âœ… Seller panel confirmed open (${checkboxes.length} checkboxes found)`);
       return true;
     }
     await sleep(200);
   }
-  console.warn("❌ Seller panel not detected!");
+  console.warn("âŒ Seller panel not detected!");
   return false;
 }
 
 async function verifyProductListingPage(timeout = 5000) {
-  console.log("🔍 Verifying we're on product listing page...");
+  console.log("ðŸ” Verifying we're on product listing page...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const productCards = document.querySelectorAll('[data-test="@web/site-top-of-funnel/ProductCardWrapper"]');
     if (productCards.length > 0) {
-      console.log(`✅ Product listing confirmed (${productCards.length} products found)`);
+      console.log(`âœ… Product listing confirmed (${productCards.length} products found)`);
       return true;
     }
     await sleep(200);
   }
-  console.warn("❌ Product listing page not detected!");
+  console.warn("âŒ Product listing page not detected!");
   return false;
 }
 
 async function verifyProductPage(timeout = 5000) {
-  console.log("🔍 Verifying we're on product detail page...");
+  console.log("ðŸ” Verifying we're on product detail page...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
     // Check for product-specific elements
     const addToCart = document.querySelector('[data-test="shippingAddToCartButton"]');
     const productTitle = document.querySelector('h1');
     if (addToCart || (productTitle && productTitle.textContent.length > 0)) {
-      console.log("✅ Product page confirmed");
+      console.log("âœ… Product page confirmed");
       return true;
     }
     await sleep(200);
   }
-  console.warn("❌ Product page not detected!");
+  console.warn("âŒ Product page not detected!");
   return false;
 }
 
 async function verifySellerPage(timeout = 5000) {
-  console.log("🔍 Verifying we're on seller page...");
+  console.log("ðŸ” Verifying we're on seller page...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const contactTab = document.querySelector('[data-test="tabContact"]');
     if (contactTab) {
-      console.log("✅ Seller page confirmed");
+      console.log("âœ… Seller page confirmed");
       return true;
     }
     await sleep(200);
   }
-  console.warn("❌ Seller page not detected!");
+  console.warn("âŒ Seller page not detected!");
   return false;
 }
 
 async function verifyContactTabOpen(timeout = 5000) {
-  console.log("🔍 Verifying contact tab is open...");
+  console.log("ðŸ” Verifying contact tab is open...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const contactContent = document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
     if (contactContent && contactContent.textContent.length > 0) {
-      console.log("✅ Contact tab confirmed open");
+      console.log("âœ… Contact tab confirmed open");
       return true;
     }
     await sleep(200);
   }
-  console.warn("❌ Contact tab not detected!");
+  console.warn("âŒ Contact tab not detected!");
   return false;
 }
 
@@ -272,11 +272,11 @@ function findElementByText(text, tagFilter = "a,button,span,div") {
 
 function clickElement(element, description = "element") {
   if (!element) {
-    console.warn(`❌ Cannot click ${description} - element is null`);
+    console.warn(`âŒ Cannot click ${description} - element is null`);
     return false;
   }
 
-  console.log(`🖱️  Preparing to click: ${description}`);
+  console.log(`ðŸ–±ï¸  Preparing to click: ${description}`);
   console.log(`   Element type: ${element.tagName}`);
   console.log(`   Element text: ${element.textContent?.substring(0, 50)}`);
   console.log(`   Element visible: ${element.offsetParent !== null}`);
@@ -286,7 +286,7 @@ function clickElement(element, description = "element") {
 
   // Click the element
   element.click();
-  console.log(`✅ Clicked: ${description}`);
+  console.log(`âœ… Clicked: ${description}`);
   return true;
 }
 
@@ -314,10 +314,185 @@ function parseContactText(text) {
 }
 
 // --------------------
+// New tab helpers
+// --------------------
+function findInNewTab(newTab, text, tagFilter = "a,button,span,div") {
+  try {
+    const candidates = newTab.document.querySelectorAll(tagFilter);
+    const target = text.trim().toLowerCase();
+    for (const el of candidates) {
+      if (el.textContent && el.textContent.trim().toLowerCase().includes(target)) {
+        return el;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function findContactTab(newTab) {
+  try {
+    return (
+      newTab.document.querySelector('[data-test="tabContact"]') ||
+      newTab.document.querySelector('#tab-Contact') ||
+      newTab.document.querySelector('button[aria-controls="tabContent-tab-Contact"]') ||
+      findInNewTab(newTab, "Contact", "button")
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function waitForContactTab(newTab, timeout = 30000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const tab = findContactTab(newTab);
+    if (tab) return tab;
+    await sleep(500);
+  }
+  return null;
+}
+
+async function waitForNewTabDocument(newTab, timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      if (newTab.document) return true;
+    } catch {
+      // Cross-origin or not ready
+    }
+    await sleep(250);
+  }
+  return false;
+}
+
+async function findSoldByLinkWithRetries(newTab, attempts = 5, delayMs = 2000) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    console.log(`ðŸ” [${attempt}/${attempts}] Looking for "Sold & shipped by"...`);
+
+    let soldByLink =
+      findInNewTab(newTab, "Sold & shipped by", "a") ||
+      findInNewTab(newTab, "Sold & shipped by", "button") ||
+      findInNewTab(newTab, "Sold & shipped by") ||
+      findInNewTab(newTab, "Sold and shipped by");
+
+    if (soldByLink) return soldByLink;
+
+    console.warn("âš ï¸ 'Sold & shipped by' not found yet, waiting...");
+    await sleep(delayMs);
+  }
+
+  return null;
+}
+
+async function getContactDataWithRetries(newTab, attempts = 3, delayMs = 8000) {
+  let lastContactText = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    console.log(`ðŸ” [${attempt}/${attempts}] Checking contact tab/content...`);
+
+    const contactTab = await waitForContactTab(newTab, 5000);
+    if (contactTab) {
+      contactTab.scrollIntoView({ behavior: "smooth", block: "center" });
+      contactTab.click();
+      await sleep(2000);
+
+      const contactContentEl = newTab.document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
+      if (contactContentEl && contactContentEl.textContent && contactContentEl.textContent.trim().length > 0) {
+        lastContactText = contactContentEl.textContent;
+        const parsed = parseContactText(lastContactText);
+
+        if (parsed.email !== "Not found") {
+          return { parsed, contactText: lastContactText };
+        }
+
+        console.warn("âš ï¸ Email not found yet, waiting for more data...");
+      } else {
+        console.warn("âš ï¸ Contact content empty, waiting...");
+      }
+    } else {
+      console.warn("âš ï¸ Contact tab not found yet.");
+    }
+
+    await sleep(delayMs);
+  }
+
+  if (lastContactText) {
+    return { parsed: parseContactText(lastContactText), contactText: lastContactText };
+  }
+
+  return null;
+}
+
+async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
+  console.log(`Ã°Å¸â€Â New tab URL: ${newTab.location.href}`);
+  console.log("Ã°Å¸â€Â Searching for 'Sold & shipped by' link in new tab...");
+
+  await sleep(500);
+  const soldByLink = await findSoldByLinkWithRetries(newTab, 5, 2000);
+
+  if (!soldByLink) {
+    console.warn("Ã¢Å¡Â Ã¯Â¸Â 'Sold & shipped by' not found in new tab");
+    return {
+      retry: true,
+      sellerData: {
+        id: sellerIndex,
+        unique_id: sellerId,
+        email: "Sold & shipped by not found",
+        store_link: "Not found"
+      }
+    };
+  }
+
+  console.log("Ã¢Å“â€¦ Found 'Sold & shipped by' link in new tab");
+  console.log("Ã°Å¸â€“Â±Ã¯Â¸Â  Clicking in new tab...");
+
+  soldByLink.scrollIntoView({ behavior: "smooth", block: "center" });
+  soldByLink.click();
+  await sleep(1500);
+
+  const sellerPageUrl = newTab.location.href;
+  console.log(`Ã°Å¸â€Â Seller page URL: ${sellerPageUrl}`);
+
+  const contactData = await getContactDataWithRetries(newTab, 3, 8000);
+  if (contactData) {
+    const parsed = contactData.parsed;
+    const emailFound = parsed.email !== "Not found";
+
+    console.log(`Ã°Å¸â€œÂ§ Extracted - Business: ${parsed.businessName}, Email: ${parsed.email}`);
+    console.log(`Ã°Å¸â€â€” Store Link: ${sellerPageUrl}`);
+
+    return {
+      retry: !emailFound,
+      sellerData: {
+        id: sellerIndex,
+        unique_id: sellerId,
+        business_name: parsed.businessName,
+        email: parsed.email,
+        headquarters: parsed.headquarters,
+        store_link: sellerPageUrl
+      }
+    };
+  }
+
+  console.warn("Ã¢Å¡Â Ã¯Â¸Â Contact tab/content not available after waiting");
+  return {
+    retry: true,
+    sellerData: {
+      id: sellerIndex,
+      unique_id: sellerId,
+      email: "Not found - No contact tab",
+      store_link: sellerPageUrl
+    }
+  };
+}
+
+// --------------------
 // Seller loop
 // --------------------
 async function collectSellerEmails() {
-  console.log("⏳ Waiting for seller panel to load...");
+  console.log("â³ Waiting for seller panel to load...");
 
   // Wait for seller checkboxes to appear (not just the modal)
   let tempCheckboxes = null;
@@ -325,23 +500,23 @@ async function collectSellerEmails() {
   while (attempts < 10) {
     await sleep(500);
     tempCheckboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
-    console.log(`🔍 Attempt ${attempts + 1}: Found ${tempCheckboxes.length} seller checkboxes`);
+    console.log(`ðŸ” Attempt ${attempts + 1}: Found ${tempCheckboxes.length} seller checkboxes`);
 
     if (tempCheckboxes.length > 1) { // More than just "Include out of stock"
-      console.log("✅ Seller checkboxes loaded!");
+      console.log("âœ… Seller checkboxes loaded!");
       break;
     }
     attempts++;
   }
 
   if (tempCheckboxes.length <= 1) {
-    console.warn("❌ Seller checkboxes not found after waiting");
+    console.warn("âŒ Seller checkboxes not found after waiting");
     return;
   }
 
   await sleep(500); // Extra wait for stability
 
-  console.log("🔍 Filtering seller checkboxes...");
+  console.log("ðŸ” Filtering seller checkboxes...");
 
   // Filter out "Include out of stock" and disabled checkboxes
   let skipped = 0;
@@ -364,12 +539,12 @@ async function collectSellerEmails() {
     return true;
   });
 
-  console.log(`✅ Valid sellers found: ${sellerCheckboxes.length}`);
+  console.log(`âœ… Valid sellers found: ${sellerCheckboxes.length}`);
   console.log(`   - Skipped "Include out of stock": ${skipped}`);
   console.log(`   - Skipped disabled: ${disabled}`);
 
   if (sellerCheckboxes.length === 0) {
-    console.warn("❌ No valid seller checkboxes found. Exiting.");
+    console.warn("âŒ No valid seller checkboxes found. Exiting.");
     return;
   }
 
@@ -378,15 +553,15 @@ async function collectSellerEmails() {
 
   let previousSellerId = await getPreviousSellerId();
 
-  console.log(`🔄 Resuming from seller ${startIndex + 1} of ${sellerCheckboxes.length}`);
+  console.log(`ðŸ”„ Resuming from seller ${startIndex + 1} of ${sellerCheckboxes.length}`);
 
   for (let i = startIndex; i < sellerCheckboxes.length; i++) {
     // Check if user requested stop
     if (shouldStopAutomation) {
-      console.log("🛑 ========================================");
-      console.log("🛑 AUTOMATION STOPPED BY USER");
-      console.log("🛑 ========================================");
-      console.log(`📊 Processed ${i} of ${sellerCheckboxes.length} sellers before stopping`);
+      console.log("ðŸ›‘ ========================================");
+      console.log("ðŸ›‘ AUTOMATION STOPPED BY USER");
+      console.log("ðŸ›‘ ========================================");
+      console.log(`ðŸ“Š Processed ${i} of ${sellerCheckboxes.length} sellers before stopping`);
       await logSellerDataAsJSON();
       return;
     }
@@ -397,46 +572,46 @@ async function collectSellerEmails() {
     const dataTest = input.getAttribute("data-test") || "";
     const sellerId = dataTest.replace("facet-checkbox-", "");
 
-    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`🔄 [${i + 1}/${sellerCheckboxes.length}] Processing seller: ${sellerId}`);
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    console.log(`\nâ”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”`);
+    console.log(`ðŸ”„ [${i + 1}/${sellerCheckboxes.length}] Processing seller: ${sellerId}`);
+    console.log(`â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n`);
 
     // Uncheck previous seller if still checked
     if (previousSellerId) {
-      console.log(`🔄 Unchecking previous seller: ${previousSellerId}`);
+      console.log(`ðŸ”„ Unchecking previous seller: ${previousSellerId}`);
       const prev = document.querySelector(`[data-test="facet-checkbox-${previousSellerId}"]`);
       if (prev && prev.checked) {
-        console.log("✅ Previous seller was checked, unchecking...");
+        console.log("âœ… Previous seller was checked, unchecking...");
         prev.click();
         await sleep(400);
       } else {
-        console.log("ℹ️ Previous seller already unchecked");
+        console.log("â„¹ï¸ Previous seller already unchecked");
       }
     }
 
     // Get the current checkbox from DOM (in case DOM changed)
     const currentCheckbox = document.querySelector(`[data-test="facet-checkbox-${sellerId}"]`);
     if (!currentCheckbox) {
-      console.error(`❌ Checkbox for ${sellerId} not found in DOM`);
+      console.error(`âŒ Checkbox for ${sellerId} not found in DOM`);
       continue;
     }
 
-    console.log("🖱️  Clicking: Seller checkbox");
+    console.log("ðŸ–±ï¸  Clicking: Seller checkbox");
     currentCheckbox.click();
     await sleep(600);
 
-    console.log("🖱️  Clicking: Apply button (1st click)");
+    console.log("ðŸ–±ï¸  Clicking: Apply button (1st click)");
     click('[data-test="@web/FacetModalButtons/ApplyButton"]');
     await sleep(1200);
 
-    console.log("🖱️  Clicking: Apply button (2nd click)");
+    console.log("ðŸ–±ï¸  Clicking: Apply button (2nd click)");
     click('[data-test="@web/FacetModalButtons/ApplyButton"]');
     await sleep(2000);
 
     // Verify we're back on product listing
     const onProductListing = await verifyProductListingPage(8000);
     if (!onProductListing) {
-      console.error(`❌ Failed to return to product listing for seller ${i + 1}`);
+      console.error(`âŒ Failed to return to product listing for seller ${i + 1}`);
       await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Navigation failed" });
       await setCurrentSellerIndex(i + 1);
       await setPreviousSellerId(sellerId);
@@ -446,7 +621,7 @@ async function collectSellerEmails() {
 
     const firstProductLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
     if (!firstProductLink) {
-      console.warn(`⚠️ No product link for seller ${i + 1}`);
+      console.warn(`âš ï¸ No product link for seller ${i + 1}`);
       await saveSellerData({
         id: i + 1,
         unique_id: sellerId,
@@ -458,195 +633,97 @@ async function collectSellerEmails() {
       previousSellerId = sellerId;
 
       // Re-open filters for next seller
-      console.log("🖱️  Clicking: Filters menu");
+      console.log("ðŸ–±ï¸  Clicking: Filters menu");
       click('[data-test="filters-menu"]');
       await sleep(800);
       await verifyModalOpen();
-      console.log("🖱️  Clicking: Sold by button");
+      console.log("ðŸ–±ï¸  Clicking: Sold by button");
       click('[data-test="facet-group-d_sellers_all"]');
       await sleep(1200);
       await verifySellerPanelOpen();
       continue;
-    }
-
-    // Get product URL and open in new tab
+    }    // Get product URL and open in new tab (retry same store if no data)
     const productUrl = firstProductLink.href;
     console.log(`🔗 Opening product in new tab: ${productUrl}`);
 
-    const newTab = window.open(productUrl, '_blank');
-    if (!newTab) {
-      console.error("❌ Failed to open new tab (popup blocked?)");
-      await saveSellerData({
-        id: i + 1,
-        unique_id: sellerId,
-        email: "Not found - Popup blocked",
-        store_link: "Not found"
-      });
-      await setCurrentSellerIndex(i + 1);
-      await setPreviousSellerId(sellerId);
-      previousSellerId = sellerId;
-      continue;
-    }
+    let finalSellerData = null;
+    let attemptsLeft = 2;
 
-    console.log("⏳ Waiting for new tab to load...");
-    await sleep(4000); // Give new tab time to load
-
-    // Switch focus to new tab to work with it
-    console.log("🔄 Working in new tab...");
-
-    // Wait for new tab to be ready
-    let tabReady = false;
-    for (let attempt = 0; attempt < 20; attempt++) {
-      try {
-        if (newTab.document && newTab.document.readyState === 'complete') {
-          tabReady = true;
-          console.log("✅ New tab loaded");
-          break;
-        }
-      } catch (e) {
-        // Cross-origin or not ready yet
-      }
-      await sleep(500);
-    }
-
-    if (!tabReady) {
-      console.error("❌ New tab did not load in time");
-      newTab.close();
-      await saveSellerData({
-        id: i + 1,
-        unique_id: sellerId,
-        email: "Not found - Tab load timeout",
-        store_link: "Not found"
-      });
-      await setCurrentSellerIndex(i + 1);
-      await setPreviousSellerId(sellerId);
-      previousSellerId = sellerId;
-      continue;
-    }
-
-    // Now extract data from the NEW TAB
-    try {
-      console.log(`🔍 New tab URL: ${newTab.location.href}`);
-      console.log("🔍 Searching for 'Sold & shipped by' link in new tab...");
-
-      // Helper function to find element in new tab
-      function findInNewTab(text, tagFilter = "a,button,span,div") {
-        const candidates = newTab.document.querySelectorAll(tagFilter);
-        const target = text.trim().toLowerCase();
-        for (const el of candidates) {
-          if (el.textContent && el.textContent.trim().toLowerCase().includes(target)) {
-            return el;
-          }
-        }
-        return null;
-      }
-
-      await sleep(1000);
-      let soldByLink = findInNewTab("Sold & shipped by", "a");
-
-      if (!soldByLink) {
-        soldByLink = findInNewTab("Sold & shipped by", "button");
-      }
-      if (!soldByLink) {
-        soldByLink = findInNewTab("Sold & shipped by");
-      }
-      if (!soldByLink) {
-        soldByLink = findInNewTab("Sold and shipped by");
-      }
-
-      if (soldByLink) {
-        console.log("✅ Found 'Sold & shipped by' link in new tab");
-        console.log(`🖱️  Clicking in new tab...`);
-
-        soldByLink.scrollIntoView({ behavior: "smooth", block: "center" });
-        soldByLink.click();
-        await sleep(3000);
-
-        const sellerPageUrl = newTab.location.href;
-        console.log(`🔍 Seller page URL: ${sellerPageUrl}`);
-
-        // Check if contact tab exists
-        const contactTab = newTab.document.querySelector('[data-test="tabContact"]');
-        if (contactTab) {
-          console.log("🖱️  Clicking Contact tab in new tab");
-          contactTab.click();
-          await sleep(1500);
-
-          const contactContentEl = newTab.document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
-          if (contactContentEl && contactContentEl.textContent) {
-            const contactText = contactContentEl.textContent;
-            const parsed = parseContactText(contactText);
-
-            console.log(`📧 Extracted - Business: ${parsed.businessName}, Email: ${parsed.email}`);
-            console.log(`🔗 Store Link: ${sellerPageUrl}`);
-
-            await saveSellerData({
-              id: i + 1,
-              unique_id: sellerId,
-              business_name: parsed.businessName,
-              email: parsed.email,
-              headquarters: parsed.headquarters,
-              store_link: sellerPageUrl
-            });
-          } else {
-            console.warn("⚠️ Contact content not found in new tab");
-            await saveSellerData({
-              id: i + 1,
-              unique_id: sellerId,
-              email: "Not found - No contact content",
-              store_link: sellerPageUrl
-            });
-          }
-        } else {
-          console.warn("⚠️ Contact tab not found in new tab");
-          await saveSellerData({
-            id: i + 1,
-            unique_id: sellerId,
-            email: "Not found - No contact tab",
-            store_link: sellerPageUrl
-          });
-        }
-      } else {
-        console.warn("⚠️ 'Sold & shipped by' link not found in new tab");
-        await saveSellerData({
+    while (attemptsLeft > 0) {
+      const newTab = window.open(productUrl, "_blank");
+      if (!newTab) {
+        console.error("❌ Failed to open new tab (popup blocked?)");
+        finalSellerData = {
           id: i + 1,
           unique_id: sellerId,
-          email: "Not found - No seller link",
+          email: "Not found - Popup blocked",
           store_link: "Not found"
-        });
+        };
+        break;
       }
-    } catch (error) {
-      console.error("❌ Error working with new tab:", error);
-      await saveSellerData({
-        id: i + 1,
-        unique_id: sellerId,
-        email: "Not found - Tab error",
-        store_link: "Not found"
-      });
+
+      console.log("⏳ Waiting for new tab to initialize...");
+      await sleep(1500);
+
+      const tabReady = await waitForNewTabDocument(newTab, 5000);
+      if (!tabReady) {
+        console.error("❌ New tab did not initialize in time");
+        newTab.close();
+        finalSellerData = {
+          id: i + 1,
+          unique_id: sellerId,
+          email: "Not found - Tab load timeout",
+          store_link: "Not found"
+        };
+        break;
+      }
+
+      try {
+        const result = await extractSellerDataFromNewTab(newTab, sellerId, i + 1);
+        finalSellerData = result.sellerData;
+        newTab.close();
+        await sleep(300);
+
+        if (result.retry && attemptsLeft > 1) {
+          console.warn("🔁 No data yet. Retrying the same store...");
+          attemptsLeft -= 1;
+          continue;
+        }
+
+        break;
+      } catch (error) {
+        console.error("❌ Error working with new tab:", error);
+        newTab.close();
+        finalSellerData = {
+          id: i + 1,
+          unique_id: sellerId,
+          email: "Not found - Tab error",
+          store_link: "Not found"
+        };
+        break;
+      }
     }
 
-    // Close the new tab
-    console.log("🔒 Closing new tab...");
-    newTab.close();
-    await sleep(500);
-    console.log("✅ New tab closed, back on main page");
+    if (finalSellerData) {
+      await saveSellerData(finalSellerData);
+    }
 
     await setCurrentSellerIndex(i + 1);
     await setPreviousSellerId(sellerId);
 
-    console.log(`✅ [${i + 1}/${sellerCheckboxes.length}] Seller ${i + 1} completed`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    console.log(`âœ… [${i + 1}/${sellerCheckboxes.length}] Seller ${i + 1} completed`);
+    console.log("â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”\n");
 
     // We're still on main page! Re-open filters for next seller
-    console.log("🔄 Preparing for next seller...");
+    console.log("ðŸ”„ Preparing for next seller...");
     await sleep(1000);
 
     // Check stop flag again before continuing
     if (shouldStopAutomation) {
-      console.log("🛑 ========================================");
-      console.log("🛑 AUTOMATION STOPPED BY USER");
-      console.log("🛑 ========================================");
-      console.log(`📊 Processed ${i + 1} of ${sellerCheckboxes.length} sellers before stopping`);
+      console.log("ðŸ›‘ ========================================");
+      console.log("ðŸ›‘ AUTOMATION STOPPED BY USER");
+      console.log("ðŸ›‘ ========================================");
+      console.log(`ðŸ“Š Processed ${i + 1} of ${sellerCheckboxes.length} sellers before stopping`);
       await logSellerDataAsJSON();
       return;
     }
@@ -654,23 +731,23 @@ async function collectSellerEmails() {
     // Verify we're still on product listing
     const stillOnListing = await verifyProductListingPage(5000);
     if (!stillOnListing) {
-      console.error("❌ Lost product listing page");
+      console.error("âŒ Lost product listing page");
       break;
     }
 
     // Re-open filters
-    console.log("🖱️  Clicking: Filters menu");
+    console.log("ðŸ–±ï¸  Clicking: Filters menu");
     click('[data-test="filters-menu"]');
     await sleep(800);
 
     const modalReopened = await verifyModalOpen(5000);
     if (!modalReopened) {
-      console.error("❌ Failed to reopen filters modal");
+      console.error("âŒ Failed to reopen filters modal");
       break;
     }
 
     // Re-open "Sold by" panel
-    console.log("🖱️  Clicking: Sold by button");
+    console.log("ðŸ–±ï¸  Clicking: Sold by button");
     click('[data-test="facet-group-d_sellers_all"]');
     await sleep(1200);
 
@@ -680,19 +757,20 @@ async function collectSellerEmails() {
     previousSellerId = sellerId;
   }
 
-  console.log("🎉 ========================================");
-  console.log("🎉 ALL SELLERS COMPLETED! DONE!");
-  console.log("🎉 ========================================");
-  console.log(`📊 Total sellers processed: ${sellerCheckboxes.length}`);
+  console.log("ðŸŽ‰ ========================================");
+  console.log("ðŸŽ‰ ALL SELLERS COMPLETED! DONE!");
+  console.log("ðŸŽ‰ ========================================");
+  console.log(`ðŸ“Š Total sellers processed: ${sellerCheckboxes.length}`);
   console.log("");
 
   await logSellerDataAsJSON();
 
   console.log("");
-  console.log("💾 Data saved in chrome.storage.local (key: 'sellerData')");
-  console.log("✅ Script execution finished.");
+  console.log("ðŸ’¾ Data saved in chrome.storage.local (key: 'sellerData')");
+  console.log("âœ… Script execution finished.");
 
   // Reset indices for next run
   await setCurrentSellerIndex(0);
   await setPreviousSellerId(null);
 }
+
