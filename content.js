@@ -91,6 +91,70 @@ async function saveCategoryData(categoryName, breadcrumbSteps) {
 // --------------------
 // Main flow
 // --------------------
+async function openFiltersAndSellerPanel(maxRetries = 5) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (shouldStopAutomation) return false;
+
+    console.log(`🔄 [Attempt ${attempt}/${maxRetries}] Opening Filters + Seller panel...`);
+
+    // Open Filters
+    console.log("🖱️  Clicking: Filters menu");
+    click('[data-test="filters-menu"]');
+    await sleep(800);
+
+    const modalOpen = await verifyModalOpen();
+    if (!modalOpen) {
+      console.warn(`⚠️ Filters modal didn't open (attempt ${attempt}/${maxRetries}), retrying...`);
+      await sleep(2000);
+      continue;
+    }
+
+    // Open Sold by
+    console.log("🖱️  Clicking: Sold by button");
+    click('[data-test="facet-group-d_sellers_all"]');
+    await sleep(1200);
+
+    const sellerPanelOpen = await verifySellerPanelOpen();
+    if (!sellerPanelOpen) {
+      console.warn(`⚠️ Seller panel didn't open (attempt ${attempt}/${maxRetries}), retrying...`);
+      // Close modal and try again
+      const closeBtn = document.querySelector('[data-test="modal-close-button"]') || document.querySelector('button[aria-label="close"]');
+      if (closeBtn) closeBtn.click();
+      await sleep(2000);
+      continue;
+    }
+
+    console.log("✅ Filters + Seller panel opened successfully");
+    return true;
+  }
+
+  console.error(`❌ Failed to open Filters/Seller panel after ${maxRetries} attempts`);
+  return false;
+}
+
+async function recoverToProductListing(maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (shouldStopAutomation) return false;
+
+    console.log(`🔄 [Recovery ${attempt}/${maxRetries}] Trying to get back to product listing...`);
+
+    // Check if we're already on listing
+    const onListing = await verifyProductListingPage(3000);
+    if (onListing) return true;
+
+    // Try going back
+    window.history.back();
+    await sleep(3000);
+
+    const backWorked = await verifyProductListingPage(5000);
+    if (backWorked) return true;
+
+    console.warn(`⚠️ Recovery attempt ${attempt} failed, retrying...`);
+    await sleep(2000);
+  }
+  return false;
+}
+
 async function runAutomation() {
   isAutomationRunning = true;
   console.log("🚀 Automation started");
@@ -103,27 +167,10 @@ async function runAutomation() {
       await saveCategoryData(categoryName, breadcrumbSteps);
     }
 
-    // Open Filters
-    console.log("🖱️  Clicking: Filters menu");
-    click('[data-test="filters-menu"]');
-    await sleep(800);
-
-    // Verify modal opened
-    const modalOpen = await verifyModalOpen();
-    if (!modalOpen) {
-      console.error("❌ Failed to open filters modal. Stopping.");
-      return;
-    }
-
-    // Open Sold by
-    console.log("🖱️  Clicking: Sold by button");
-    click('[data-test="facet-group-d_sellers_all"]');
-    await sleep(1200);
-
-    // Verify seller panel opened
-    const sellerPanelOpen = await verifySellerPanelOpen();
-    if (!sellerPanelOpen) {
-      console.error("❌ Failed to open seller panel. Stopping.");
+    // Open Filters + Seller panel with retries
+    const opened = await openFiltersAndSellerPanel();
+    if (!opened) {
+      console.error("❌ Could not open filters/seller panel after all retries. Stopping.");
       return;
     }
 
@@ -573,10 +620,12 @@ async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
 async function collectSellerEmails() {
   console.log("⏳ Waiting for seller panel to load...");
 
-  // Wait for seller checkboxes to appear (not just the modal)
+  // Wait for seller checkboxes to appear (not just the modal) - retry aggressively
   let tempCheckboxes = null;
   let attempts = 0;
-  while (attempts < 10) {
+  const maxLoadAttempts = 20; // Increased from 10
+  while (attempts < maxLoadAttempts) {
+    if (shouldStopAutomation) return;
     await sleep(500);
     tempCheckboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
     console.log(`🔍 Attempt ${attempts + 1}: Found ${tempCheckboxes.length} seller checkboxes`);
@@ -589,8 +638,20 @@ async function collectSellerEmails() {
   }
 
   if (tempCheckboxes.length <= 1) {
-    console.warn("❌ Seller checkboxes not found after waiting");
-    return;
+    console.warn("⚠️ Seller checkboxes not found, retrying with page reload...");
+    window.location.reload();
+    await sleep(5000);
+    const retryOpen = await openFiltersAndSellerPanel();
+    if (!retryOpen) {
+      console.error("❌ Seller checkboxes still not found after reload. Stopping.");
+      return;
+    }
+    // Re-check checkboxes
+    tempCheckboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
+    if (tempCheckboxes.length <= 1) {
+      console.error("❌ No seller checkboxes found even after reload. Stopping.");
+      return;
+    }
   }
 
   await sleep(500); // Extra wait for stability
@@ -653,160 +714,195 @@ async function collectSellerEmails() {
     const dataTest = input.getAttribute("data-test") || "";
     const sellerId = dataTest.replace("facet-checkbox-", "");
 
-    console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`🔄 [${i + 1}/${sellerCheckboxes.length}] Processing seller: ${sellerId}`);
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+    try {
+      console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`🔄 [${i + 1}/${sellerCheckboxes.length}] Processing seller: ${sellerId}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
 
-    // Uncheck all currently checked seller checkboxes
-    await uncheckAllSellers();
+      // Uncheck all currently checked seller checkboxes
+      await uncheckAllSellers();
 
-    // Get the current checkbox from DOM (in case DOM changed)
-    const currentCheckbox = document.querySelector(`[data-test="facet-checkbox-${sellerId}"]`);
-    if (!currentCheckbox) {
-      console.error(`❌ Checkbox for ${sellerId} not found in DOM`);
-      continue;
-    }
+      // Get the current checkbox from DOM (in case DOM changed)
+      const currentCheckbox = document.querySelector(`[data-test="facet-checkbox-${sellerId}"]`);
+      if (!currentCheckbox) {
+        console.error(`❌ Checkbox for ${sellerId} not found in DOM`);
+        await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Checkbox missing" });
+        await setCurrentSellerIndex(i + 1);
+        continue;
+      }
 
-    console.log("🖱️  Clicking: Seller checkbox");
-    currentCheckbox.click();
-    await sleep(600);
+      console.log("🖱️  Clicking: Seller checkbox");
+      currentCheckbox.click();
+      await sleep(600);
 
-    console.log("🖱️  Clicking: Apply button (1st click)");
-    click('[data-test="@web/FacetModalButtons/ApplyButton"]');
-    await sleep(1200);
-
-    console.log("🖱️  Clicking: Apply button (2nd click)");
-    click('[data-test="@web/FacetModalButtons/ApplyButton"]');
-    await sleep(2000);
-
-    // Verify we're back on product listing
-    const onProductListing = await verifyProductListingPage(8000);
-    if (!onProductListing) {
-      console.error(`❌ Failed to return to product listing for seller ${i + 1}`);
-      await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Navigation failed" });
-      await setCurrentSellerIndex(i + 1);
-      continue;
-    }
-
-    const firstProductLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
-    if (!firstProductLink) {
-      console.warn(`⚠️ No product link for seller ${i + 1}`);
-      await saveSellerData({
-        id: i + 1,
-        unique_id: sellerId,
-        email: "Not found",
-        store_link: "Not found"
-      });
-      await setCurrentSellerIndex(i + 1);
-
-      // Re-open filters for next seller
-      console.log("🖱️  Clicking: Filters menu");
-      click('[data-test="filters-menu"]');
-      await sleep(800);
-      await verifyModalOpen();
-      console.log("🖱️  Clicking: Sold by button");
-      click('[data-test="facet-group-d_sellers_all"]');
+      console.log("🖱️  Clicking: Apply button (1st click)");
+      click('[data-test="@web/FacetModalButtons/ApplyButton"]');
       await sleep(1200);
-      await verifySellerPanelOpen();
-      continue;
-    }
 
-    // Get product URL and open in new tab
-    const productUrl = firstProductLink.href;
-    console.log(`🔗 Opening product in new tab: ${productUrl}`);
+      console.log("🖱️  Clicking: Apply button (2nd click)");
+      click('[data-test="@web/FacetModalButtons/ApplyButton"]');
+      await sleep(2000);
 
-    let finalSellerData = null;
+      // Verify we're back on product listing
+      const onProductListing = await verifyProductListingPage(8000);
+      if (!onProductListing) {
+        console.error(`❌ Failed to return to product listing for seller ${i + 1}`);
+        await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Navigation failed" });
+        await setCurrentSellerIndex(i + 1);
+        continue;
+      }
 
-    const newTab = window.open(productUrl, "_blank");
-    if (!newTab) {
-      console.error("❌ Failed to open new tab (popup blocked?)");
-      finalSellerData = {
-        id: i + 1,
-        unique_id: sellerId,
-        email: "Not found - Popup blocked",
-        store_link: "Not found"
-      };
-    } else {
-      console.log("⏳ Waiting for new tab to initialize...");
-      await sleep(1500);
+      const firstProductLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
+      if (!firstProductLink) {
+        console.warn(`⚠️ No product link for seller ${i + 1}`);
+        await saveSellerData({
+          id: i + 1,
+          unique_id: sellerId,
+          email: "Not found",
+          store_link: "Not found"
+        });
+        await setCurrentSellerIndex(i + 1);
 
-      const tabReady = await waitForNewTabDocument(newTab, 5000);
-      if (!tabReady) {
-        console.error("❌ New tab did not initialize in time");
-        newTab.close();
+        // Re-open filters for next seller
+        await openFiltersAndSellerPanel();
+        continue;
+      }
+
+      // Get product URL and open in new tab
+      const productUrl = firstProductLink.href;
+      console.log(`🔗 Opening product in new tab: ${productUrl}`);
+
+      let finalSellerData = null;
+
+      const newTab = window.open(productUrl, "_blank");
+      if (!newTab) {
+        console.error("❌ Failed to open new tab (popup blocked?)");
         finalSellerData = {
           id: i + 1,
           unique_id: sellerId,
-          email: "Not found - Tab load timeout",
+          email: "Not found - Popup blocked",
           store_link: "Not found"
         };
       } else {
-        try {
-          const result = await extractSellerDataFromNewTab(newTab, sellerId, i + 1);
-          finalSellerData = result.sellerData;
-          newTab.close();
-          await sleep(300);
-        } catch (error) {
-          console.error("❌ Error working with new tab:", error);
-          newTab.close();
+        console.log("⏳ Waiting for new tab to initialize...");
+        await sleep(1500);
+
+        const tabReady = await waitForNewTabDocument(newTab, 5000);
+        if (!tabReady) {
+          console.error("❌ New tab did not initialize in time");
+          try { newTab.close(); } catch(e) {}
           finalSellerData = {
             id: i + 1,
             unique_id: sellerId,
-            email: "Not found - Tab error",
+            email: "Not found - Tab load timeout",
             store_link: "Not found"
           };
+        } else {
+          try {
+            const result = await extractSellerDataFromNewTab(newTab, sellerId, i + 1);
+            finalSellerData = result.sellerData;
+            try { newTab.close(); } catch(e) {}
+            await sleep(300);
+          } catch (error) {
+            console.error("❌ Error working with new tab:", error);
+            try { newTab.close(); } catch(e) {}
+            finalSellerData = {
+              id: i + 1,
+              unique_id: sellerId,
+              email: "Not found - Tab error",
+              store_link: "Not found"
+            };
+          }
         }
       }
+
+      if (finalSellerData) {
+        await saveSellerData(finalSellerData);
+      }
+
+      await setCurrentSellerIndex(i + 1);
+
+      console.log(`✅ [${i + 1}/${sellerCheckboxes.length}] Seller ${i + 1} completed`);
+      console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+      // We're still on main page! Re-open filters for next seller
+      console.log("🔄 Preparing for next seller...");
+      await sleep(1000);
+
+      // Check stop flag again before continuing
+      if (shouldStopAutomation) {
+        console.log("🛑 ========================================");
+        console.log("🛑 AUTOMATION STOPPED BY USER");
+        console.log("🛑 ========================================");
+        console.log(`📊 Processed ${i + 1} of ${sellerCheckboxes.length} sellers before stopping`);
+        await logSellerDataAsJSON();
+        return;
+      }
+
+      // Verify we're still on product listing - recover if lost
+      let stillOnListing = await verifyProductListingPage(5000);
+      if (!stillOnListing) {
+        console.warn("⚠️ Lost product listing page, attempting recovery...");
+        stillOnListing = await recoverToProductListing();
+        if (!stillOnListing) {
+          console.error("❌ Could not recover product listing, but continuing to next seller...");
+          await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Page recovery failed" });
+          await setCurrentSellerIndex(i + 1);
+          // Try reloading the page and reopening filters
+          window.location.reload();
+          await sleep(5000);
+        }
+      }
+
+      // Re-open filters + seller panel with retries
+      const panelReady = await openFiltersAndSellerPanel();
+      if (!panelReady) {
+        console.warn("⚠️ Could not reopen filters panel, trying page reload...");
+        window.location.reload();
+        await sleep(5000);
+        // After reload, try once more
+        const retryPanel = await openFiltersAndSellerPanel();
+        if (!retryPanel) {
+          console.error("❌ Still can't open filters after reload, skipping to next seller...");
+          continue;
+        }
+      }
+
+    } catch (loopError) {
+      // NEVER let any error stop the loop
+      console.error(`❌ Unexpected error processing seller ${i + 1} (${sellerId}):`, loopError);
+      console.log("⚠️ Saving error and continuing to next seller...");
+
+      try {
+        await saveSellerData({
+          id: i + 1,
+          unique_id: sellerId,
+          email: "Not found - Unexpected error",
+          store_link: "Not found"
+        });
+        await setCurrentSellerIndex(i + 1);
+      } catch (saveError) {
+        console.error("❌ Even saving failed:", saveError);
+      }
+
+      // Try to recover for next iteration
+      try {
+        await sleep(3000);
+        const recovered = await recoverToProductListing();
+        if (recovered) {
+          await openFiltersAndSellerPanel();
+        } else {
+          window.location.reload();
+          await sleep(5000);
+          await openFiltersAndSellerPanel();
+        }
+      } catch (recoveryError) {
+        console.error("❌ Recovery also failed:", recoveryError);
+        // Still don't stop - the next iteration will try again
+      }
+
+      continue;
     }
-
-    if (finalSellerData) {
-      await saveSellerData(finalSellerData);
-    }
-
-    await setCurrentSellerIndex(i + 1);
-
-    console.log(`✅ [${i + 1}/${sellerCheckboxes.length}] Seller ${i + 1} completed`);
-    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-
-    // We're still on main page! Re-open filters for next seller
-    console.log("🔄 Preparing for next seller...");
-    await sleep(1000);
-
-    // Check stop flag again before continuing
-    if (shouldStopAutomation) {
-      console.log("🛑 ========================================");
-      console.log("🛑 AUTOMATION STOPPED BY USER");
-      console.log("🛑 ========================================");
-      console.log(`📊 Processed ${i + 1} of ${sellerCheckboxes.length} sellers before stopping`);
-      await logSellerDataAsJSON();
-      return;
-    }
-
-    // Verify we're still on product listing
-    const stillOnListing = await verifyProductListingPage(5000);
-    if (!stillOnListing) {
-      console.error("❌ Lost product listing page");
-      break;
-    }
-
-    // Re-open filters
-    console.log("🖱️  Clicking: Filters menu");
-    click('[data-test="filters-menu"]');
-    await sleep(800);
-
-    const modalReopened = await verifyModalOpen(5000);
-    if (!modalReopened) {
-      console.error("❌ Failed to reopen filters modal");
-      break;
-    }
-
-    // Re-open "Sold by" panel
-    console.log("🖱️  Clicking: Sold by button");
-    click('[data-test="facet-group-d_sellers_all"]');
-    await sleep(1200);
-
-    // Wait for seller checkboxes to reload
-    await sleep(1000);
   }
 
   console.log("🎉 ========================================");
