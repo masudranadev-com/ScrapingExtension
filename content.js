@@ -10,6 +10,7 @@ window.__targetMailHunterLoaded = true;
 // Global state
 // --------------------
 let shouldStopAutomation = false;
+let isAutomationRunning = false;
 
 // --------------------
 // Utility helpers
@@ -33,6 +34,10 @@ function click(selector) {
 // --------------------
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg.action === "START_AUTOMATION") {
+    if (isAutomationRunning) {
+      console.log("⚠️ Automation already running, ignoring duplicate start");
+      return;
+    }
     shouldStopAutomation = false;
     runAutomation();
   } else if (msg.action === "STOP_AUTOMATION") {
@@ -87,41 +92,46 @@ async function saveCategoryData(categoryName, breadcrumbSteps) {
 // Main flow
 // --------------------
 async function runAutomation() {
+  isAutomationRunning = true;
   console.log("🚀 Automation started");
 
-  // Extract and cache category info
-  const categoryName = extractCategoryName();
-  const breadcrumbSteps = extractBreadcrumbSteps();
-  if (categoryName) {
-    await saveCategoryData(categoryName, breadcrumbSteps);
+  try {
+    // Extract and cache category info
+    const categoryName = extractCategoryName();
+    const breadcrumbSteps = extractBreadcrumbSteps();
+    if (categoryName) {
+      await saveCategoryData(categoryName, breadcrumbSteps);
+    }
+
+    // Open Filters
+    console.log("🖱️  Clicking: Filters menu");
+    click('[data-test="filters-menu"]');
+    await sleep(800);
+
+    // Verify modal opened
+    const modalOpen = await verifyModalOpen();
+    if (!modalOpen) {
+      console.error("❌ Failed to open filters modal. Stopping.");
+      return;
+    }
+
+    // Open Sold by
+    console.log("🖱️  Clicking: Sold by button");
+    click('[data-test="facet-group-d_sellers_all"]');
+    await sleep(1200);
+
+    // Verify seller panel opened
+    const sellerPanelOpen = await verifySellerPanelOpen();
+    if (!sellerPanelOpen) {
+      console.error("❌ Failed to open seller panel. Stopping.");
+      return;
+    }
+
+    // Collect emails
+    await collectSellerEmails();
+  } finally {
+    isAutomationRunning = false;
   }
-
-  // Open Filters
-  console.log("🖱️  Clicking: Filters menu");
-  click('[data-test="filters-menu"]');
-  await sleep(800);
-
-  // Verify modal opened
-  const modalOpen = await verifyModalOpen();
-  if (!modalOpen) {
-    console.error("❌ Failed to open filters modal. Stopping.");
-    return;
-  }
-
-  // Open Sold by
-  console.log("🖱️  Clicking: Sold by button");
-  click('[data-test="facet-group-d_sellers_all"]');
-  await sleep(1200);
-
-  // Verify seller panel opened
-  const sellerPanelOpen = await verifySellerPanelOpen();
-  if (!sellerPanelOpen) {
-    console.error("❌ Failed to open seller panel. Stopping.");
-    return;
-  }
-
-  // Collect emails
-  await collectSellerEmails();
 }
 
 // --------------------
