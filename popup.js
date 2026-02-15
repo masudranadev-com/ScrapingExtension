@@ -10,20 +10,29 @@ startButton.addEventListener("click", async () => {
   });
 
   if (!isRunning) {
-    // Start automation
-    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION" }, () => {
+    // Start automation - try sending message, inject script if not available
+    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION" }, async () => {
       if (chrome.runtime.lastError) {
-        console.warn("Content script not available:", chrome.runtime.lastError.message);
-        alert("This page is not ready for the extension. Please refresh the page or open a supported page, then try again.");
+        console.warn("Content script not loaded, injecting now...");
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ["content.js"]
+          });
+          // Retry after injection
+          chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION" }, () => {
+            if (chrome.runtime.lastError) {
+              return;
+            }
+            window.close();
+          });
+        } catch (e) {
+        }
         return;
       }
+      // Message delivered, close popup
+      window.close();
     });
-
-    // Change button to Stop
-    startButton.textContent = "⏹ Stop";
-    startButton.style.background = "#ff3b3b";
-    startButton.style.color = "#ffffff";
-    isRunning = true;
   } else {
     // Stop automation
     chrome.tabs.sendMessage(tab.id, { action: "STOP_AUTOMATION" }, () => {
