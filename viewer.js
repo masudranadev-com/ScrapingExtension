@@ -7,8 +7,26 @@ let totalSellers = 0;
 window.addEventListener('DOMContentLoaded', loadData);
 
 // Search functionality
-document.getElementById('searchBox').addEventListener('input', (e) => {
-  const query = e.target.value.toLowerCase();
+const searchBox = document.getElementById('searchBox');
+const tableBody = document.getElementById('tableBody');
+
+searchBox.placeholder = 'Search by business name, email, phone, or seller ID...';
+
+searchBox.addEventListener('input', () => {
+  applySearch();
+  renderTable();
+});
+
+tableBody.addEventListener('click', (e) => {
+  const removeButton = e.target.closest('.btn-remove');
+  if (!removeButton) return;
+
+  const index = Number(removeButton.dataset.index);
+  removeSeller(index);
+});
+
+function applySearch() {
+  const query = searchBox.value.trim().toLowerCase();
   if (query === '') {
     filteredData = allData;
   } else {
@@ -16,12 +34,13 @@ document.getElementById('searchBox').addEventListener('input', (e) => {
       return (
         (seller.business_name && seller.business_name.toLowerCase().includes(query)) ||
         (seller.email && seller.email.toLowerCase().includes(query)) ||
+        (seller.mobile_number && seller.mobile_number.toLowerCase().includes(query)) ||
+        (seller.error_reason && seller.error_reason.toLowerCase().includes(query)) ||
         (seller.unique_id && seller.unique_id.toLowerCase().includes(query))
       );
     });
   }
-  renderTable();
-});
+}
 
 // Refresh button
 document.getElementById('refreshData').addEventListener('click', loadData);
@@ -62,11 +81,11 @@ document.getElementById('clearData').addEventListener('click', () => {
 // Load data from chrome.storage
 function loadData() {
   chrome.storage.local.get(['sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers'], (result) => {
-    allData = result.sellerData || [];
-    filteredData = allData;
+    allData = Array.isArray(result.sellerData) ? result.sellerData : [];
     categoryName = result.categoryName || '';
     totalSellers = result.totalSellers || 0;
     const breadcrumbSteps = result.breadcrumbSteps || [];
+    applySearch();
     renderCategoryInfo(categoryName, breadcrumbSteps);
     renderTable();
     updateStats();
@@ -98,11 +117,21 @@ function renderCategoryInfo(name, steps) {
   }
 }
 
-// Remove a seller by unique_id
-function removeSeller(uniqueId) {
-  allData = allData.filter(s => s.unique_id !== uniqueId);
-  filteredData = filteredData.filter(s => s.unique_id !== uniqueId);
-  chrome.storage.local.set({ sellerData: allData }, () => {
+// Remove a seller by its current source index in sellerData.
+function removeSeller(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= allData.length) return;
+
+  allData.splice(index, 1);
+  totalSellers = allData.length;
+
+  chrome.storage.local.set({ sellerData: allData, totalSellers }, () => {
+    if (chrome.runtime.lastError) {
+      alert(`Failed to remove seller: ${chrome.runtime.lastError.message}`);
+      loadData();
+      return;
+    }
+
+    applySearch();
     renderTable();
     updateStats();
   });
@@ -110,7 +139,6 @@ function removeSeller(uniqueId) {
 
 // Render table
 function renderTable() {
-  const tableBody = document.getElementById('tableBody');
   const emptyState = document.getElementById('emptyState');
   const dataTable = document.getElementById('dataTable');
 
@@ -124,50 +152,74 @@ function renderTable() {
   dataTable.style.display = 'table';
 
   tableBody.innerHTML = filteredData.map((seller, index) => {
+    const sourceIndex = allData.indexOf(seller);
     const hasEmail = seller.email && !seller.email.includes('Not found');
     const statusBadge = hasEmail
       ? '<span class="badge badge-success">✓ Found</span>'
       : '<span class="badge badge-danger">✗ Not Found</span>';
 
     return `
-      <tr>
-        <td>${seller.id || index + 1}</td>
-        <td><code>${seller.unique_id || 'N/A'}</code></td>
-        <td class="cell-long">${seller.business_name || 'N/A'}</td>
-        <td class="cell-long">${seller.email || 'N/A'}</td>
-        <td class="cell-long">${seller.headquarters || 'N/A'}</td>
+      <tr data-index="${sourceIndex}">
+        <td>${escapeHTML(seller.id || index + 1)}</td>
+        <td><code>${escapeHTML(seller.unique_id || 'N/A')}</code></td>
+        <td class="cell-long">${escapeHTML(seller.business_name || 'N/A')}</td>
+        <td class="cell-long">${escapeHTML(seller.email || 'N/A')}</td>
+        <td class="cell-long">${escapeHTML(seller.mobile_number || 'N/A')}</td>
+        <td class="cell-long">${escapeHTML(seller.headquarters || 'N/A')}</td>
         <td>
           ${seller.store_link && !seller.store_link.includes('Not found')
-            ? `<a href="${seller.store_link}" target="_blank" class="link">View Store</a>`
+            ? `<a href="${escapeHTML(seller.store_link)}" target="_blank" class="link">View Store</a>`
             : 'N/A'}
         </td>
+        <td class="cell-long">${escapeHTML(seller.error_reason || 'N/A')}</td>
         <td>${statusBadge}</td>
-        <td><button class="btn-remove" onclick="removeSeller('${seller.unique_id}')">✕</button></td>
+        <td><button type="button" class="btn-remove" data-index="${sourceIndex}" title="Remove seller">&times;</button></td>
       </tr>
     `;
   }).join('');
+
+  tableBody.querySelectorAll('.btn-remove').forEach((button, buttonIndex) => {
+    const sourceIndex = allData.indexOf(filteredData[buttonIndex]);
+    button.removeAttribute('onclick');
+    button.type = 'button';
+    button.dataset.index = sourceIndex;
+    button.title = 'Remove seller';
+    button.innerHTML = '&times;';
+  });
 }
 
 // Update statistics
 function updateStats() {
   const emailCount = allData.filter(s => s.email && !s.email.includes('Not found')).length;
 
-  document.getElementById('totalCount').textContent = totalSellers || allData.length;
+  document.getElementById('totalCount').textContent = allData.length;
   document.getElementById('emailCount').textContent = emailCount;
+}
+
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[char]));
 }
 
 // Convert to CSV
 function convertToCSV(data) {
   if (data.length === 0) return '';
 
-  const headers = ['ID', 'Seller ID', 'Business Name', 'Email', 'Headquarters', 'Store Link'];
+  const headers = ['ID', 'Seller ID', 'Business Name', 'Email', 'Mobile Number', 'Headquarters', 'Store Link', 'Error Reason'];
   const rows = data.map(seller => [
     seller.id || '',
     seller.unique_id || '',
     seller.business_name || '',
     seller.email || '',
+    seller.mobile_number || '',
     seller.headquarters || '',
-    seller.store_link || ''
+    seller.store_link || '',
+    seller.error_reason || ''
   ]);
 
   const csvContent = [

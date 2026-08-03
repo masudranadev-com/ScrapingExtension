@@ -227,7 +227,15 @@ function setStorage(obj) {
 
 async function saveSellerData(sellerData) {
   const data = await getStorage("sellerData", []);
-  data.push(sellerData);
+  data.push({
+    business_name: "Not found",
+    email: "Not found",
+    headquarters: "Not found",
+    mobile_number: "Not found",
+    store_link: "Not found",
+    error_reason: "",
+    ...sellerData
+  });
   await setStorage({ sellerData: data });
 }
 
@@ -422,11 +430,13 @@ function getModal() {
 
 function parseContactText(text) {
   const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
+  const phoneMatch = text.match(/(?:\+?1[\s.-]*)?(?:\(\d{3}\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}\b/);
   const businessNameMatch = text.match(/Legal Business Name:\s*([^H]+?)(?=Headquarters:|$)/);
   const headquartersMatch = text.match(/Headquarters:(.+?)(?:Contact|Partner Information|$)/s);
 
   const businessName = businessNameMatch ? businessNameMatch[1].trim() : "Not found";
   const email = emailMatch ? emailMatch[0] : "Not found";
+  const mobileNumber = phoneMatch ? phoneMatch[0].trim() : "Not found";
   let headquarters = "Not found";
   if (headquartersMatch) {
     headquarters = headquartersMatch[1]
@@ -436,7 +446,7 @@ function parseContactText(text) {
       .join(", ");
   }
 
-  return { businessName, email, headquarters };
+  return { businessName, email, headquarters, mobileNumber };
 }
 
 // --------------------
@@ -514,41 +524,75 @@ async function findSoldByLinkWithRetries(newTab, attempts = 5, delayMs = 2000) {
 
 async function getContactDataWithRetries(newTab, attempts = 3, delayMs = 8000) {
   let lastContactText = null;
+  let lastParsed = null;
+  let lastReason = "Contact tab not found";
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     console.log(`🔍 [${attempt}/${attempts}] Checking contact tab/content...`);
 
     const contactTab = await waitForContactTab(newTab, 5000);
     if (contactTab) {
-      contactTab.scrollIntoView({ behavior: "smooth", block: "center" });
-      contactTab.click();
+      try {
+        contactTab.scrollIntoView({ behavior: "smooth", block: "center" });
+        contactTab.click();
+      } catch (error) {
+        lastReason = error && error.message ? error.message : "Contact tab click error";
+        console.warn("Contact tab click attempt failed:", error);
+        if (attempt < attempts) await sleep(delayMs);
+        continue;
+      }
       await sleep(2000);
 
-      const contactContentEl = newTab.document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
+      let contactContentEl = null;
+      try {
+        contactContentEl = newTab.document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
+      } catch (error) {
+        lastReason = error && error.message ? error.message : "Contact extraction error";
+        console.warn("Contact extraction attempt failed:", error);
+        if (attempt < attempts) await sleep(delayMs);
+        continue;
+      }
       if (contactContentEl && contactContentEl.textContent && contactContentEl.textContent.trim().length > 0) {
         lastContactText = contactContentEl.textContent;
-        const parsed = parseContactText(lastContactText);
+        lastParsed = parseContactText(lastContactText);
 
-        if (parsed.email !== "Not found") {
-          return { parsed, contactText: lastContactText };
+        if (lastParsed.email !== "Not found") {
+          return {
+            parsed: lastParsed,
+            contactText: lastContactText,
+            success: true,
+            attemptsUsed: attempt,
+            errorReason: ""
+          };
         }
+
+        lastReason = "Email not found";
 
         console.warn("⚠️ Email not found yet, waiting for more data...");
       } else {
+        lastReason = "Contact content empty";
         console.warn("⚠️ Contact content empty, waiting...");
       }
     } else {
+      lastReason = "Contact tab not found";
       console.warn("⚠️ Contact tab not found yet.");
     }
 
-    await sleep(delayMs);
+    if (attempt < attempts) await sleep(delayMs);
   }
 
-  if (lastContactText) {
-    return { parsed: parseContactText(lastContactText), contactText: lastContactText };
-  }
-
-  return null;
+  return {
+    parsed: lastParsed || {
+      businessName: "Not found",
+      email: "Not found",
+      headquarters: "Not found",
+      mobileNumber: "Not found"
+    },
+    contactText: lastContactText,
+    success: false,
+    attemptsUsed: attempts,
+    errorReason: `${lastReason} after trying ${attempts} times`
+  };
 }
 
 async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
@@ -561,12 +605,13 @@ async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
   if (!soldByLink) {
     console.warn("⚠️ 'Sold & shipped by' not found in new tab");
     return {
-      retry: true,
+      retry: false,
       sellerData: {
         id: sellerIndex,
         unique_id: sellerId,
         email: "Sold & shipped by not found",
-        store_link: "Not found"
+        store_link: "Not found",
+        error_reason: "Sold & shipped by not found"
       }
     };
   }
@@ -582,34 +627,45 @@ async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
   console.log(`🔗 Seller page URL: ${sellerPageUrl}`);
 
   const contactData = await getContactDataWithRetries(newTab, 3, 8000);
-  if (contactData) {
+  if (contactData && contactData.success) {
     const parsed = contactData.parsed;
-    const emailFound = parsed.email !== "Not found";
 
     console.log(`📧 Extracted - Business: ${parsed.businessName}, Email: ${parsed.email}`);
     console.log(`🔗 Store Link: ${sellerPageUrl}`);
 
     return {
-      retry: !emailFound,
+      retry: false,
       sellerData: {
         id: sellerIndex,
         unique_id: sellerId,
         business_name: parsed.businessName,
         email: parsed.email,
         headquarters: parsed.headquarters,
+        mobile_number: parsed.mobileNumber,
         store_link: sellerPageUrl
       }
     };
   }
 
   console.warn("⚠️ Contact tab/content not available after waiting");
+  const parsed = contactData ? contactData.parsed : {
+    businessName: "Not found",
+    headquarters: "Not found",
+    mobileNumber: "Not found"
+  };
+  const errorReason = contactData ? contactData.errorReason : "Contact data not found after trying 3 times";
+
   return {
-    retry: true,
+    retry: false,
     sellerData: {
       id: sellerIndex,
       unique_id: sellerId,
-      email: "Not found - No contact tab",
-      store_link: sellerPageUrl
+      business_name: parsed.businessName,
+      email: "Not found trying 3 times",
+      headquarters: parsed.headquarters,
+      mobile_number: parsed.mobileNumber,
+      store_link: sellerPageUrl,
+      error_reason: errorReason
     }
   };
 }
