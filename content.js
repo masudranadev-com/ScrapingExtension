@@ -1,10 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterVersion === "8.0.0") {
+if (window.__targetMailHunterVersion === "8.0.2") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
-window.__targetMailHunterVersion = "8.0.0";
+window.__targetMailHunterVersion = "8.0.2";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -254,6 +254,23 @@ function hasFoundSellerEmail(seller) {
   return Boolean(email) && !email.includes("not found");
 }
 
+function hasCompletedSoldByLookup(seller) {
+  if (!seller) return false;
+
+  return [seller.email, seller.error_reason].some((value) => {
+    const normalized = String(value || "")
+      .replace(/&amp;/gi, "&")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    const isSoldByIssue = (
+      normalized.includes("sold & shipped by") ||
+      normalized.includes("sold and shipped by")
+    );
+    return isSoldByIssue && normalized.includes("not found");
+  });
+}
+
 function normalizeSellerName(value) {
   return String(value || "")
     .normalize("NFKC")
@@ -268,6 +285,7 @@ function hasFoundSellerStatus(seller) {
       String(seller.status || "").trim().toLowerCase() === "found" ||
       seller.is_existing_client === true ||
       seller.is_duplicate_seller === true ||
+      hasCompletedSoldByLookup(seller) ||
       hasFoundSellerEmail(seller)
     )
   );
@@ -522,6 +540,7 @@ function applySignalDockResult(sellerRows, clientCheck) {
       seller.status = (
         isExistingClient ||
         isDuplicateSeller ||
+        hasCompletedSoldByLookup(seller) ||
         hasFoundSellerEmail(seller)
       ) ? "Found" : "Not Found";
 
@@ -548,6 +567,15 @@ async function refreshCachedSignalDockStatuses(cachedCatalog) {
   const newSellerCount = applySignalDockResult(sellerRows, clientCheck);
 
   await setStorage({
+    sellerNames: sellerRows.map((seller) => ({
+      id: seller.id,
+      unique_id: seller.unique_id,
+      seller_name: seller.seller_name,
+      status: seller.status,
+      is_existing_client: seller.is_existing_client,
+      is_duplicate_seller: seller.is_duplicate_seller,
+      is_new_seller: seller.is_new_seller
+    })),
     sellerData: sellerRows,
     newSellers: newSellerCount,
     clientNameCheckSucceeded: clientCheck.success,
@@ -636,8 +664,12 @@ async function initializeSellerRows(sellerCheckboxes) {
 }
 
 async function saveSellerData(sellerData) {
-  const storedData = await getStorage("sellerData", []);
+  const [storedData, storedSellerNames] = await Promise.all([
+    getStorage("sellerData", []),
+    getStorage("sellerNames", [])
+  ]);
   const data = Array.isArray(storedData) ? storedData : [];
+  const sellerNames = Array.isArray(storedSellerNames) ? storedSellerNames : [];
   const defaults = {
     seller_name: "Not found",
     business_name: "Not found",
@@ -655,6 +687,7 @@ async function saveSellerData(sellerData) {
     ? data.findIndex((seller) => String(seller.unique_id) === String(sellerData.unique_id))
     : -1;
 
+  let savedSeller;
   if (existingIndex >= 0) {
     const existingSeller = data[existingIndex];
     const updatedSeller = { ...defaults, ...existingSeller, ...sellerData };
@@ -668,13 +701,21 @@ async function saveSellerData(sellerData) {
 
     updatedSeller.status = hasFoundSellerStatus(updatedSeller) ? "Found" : "Not Found";
     data[existingIndex] = updatedSeller;
+    savedSeller = updatedSeller;
   } else {
     const newSeller = { ...defaults, ...sellerData };
     newSeller.status = hasFoundSellerStatus(newSeller) ? "Found" : "Not Found";
     data.push(newSeller);
+    savedSeller = newSeller;
   }
 
-  await setStorage({ sellerData: data });
+  const synchronizedSellerNames = sellerNames.map((seller) => (
+    String(seller.unique_id || "") === String(savedSeller.unique_id || "")
+      ? { ...seller, status: savedSeller.status }
+      : seller
+  ));
+
+  await setStorage({ sellerData: data, sellerNames: synchronizedSellerNames });
 }
 
 async function logSellerDataAsJSON() {
@@ -1061,7 +1102,8 @@ async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
         unique_id: sellerId,
         email: "Sold & shipped by not found",
         store_link: "Not found",
-        error_reason: "Sold & shipped by not found"
+        error_reason: "Sold & shipped by not found",
+        status: "Found"
       }
     };
   }

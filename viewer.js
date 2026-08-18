@@ -96,8 +96,35 @@ document.getElementById('clearData').addEventListener('click', () => {
 // Load data from chrome.storage
 function loadData() {
   chrome.storage.local.get(['sellerNames', 'sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers', 'newSellers', 'clientNameCheckSucceeded', 'clientNameCheckError'], (result) => {
-    const storedSellerData = Array.isArray(result.sellerData) ? result.sellerData : [];
-    sellerNames = Array.isArray(result.sellerNames) ? result.sellerNames : [];
+    let cacheChanged = false;
+    const storedSellerData = (Array.isArray(result.sellerData) ? result.sellerData : []).map((seller) => {
+      if (hasCompletedSoldByLookup(seller) && String(seller.status || '').trim().toLowerCase() !== 'found') {
+        cacheChanged = true;
+        return { ...seller, status: 'Found' };
+      }
+      return seller;
+    });
+    const completedSellerIds = new Set(
+      storedSellerData
+        .filter(hasCompletedSoldByLookup)
+        .map((seller) => String(seller.unique_id || ''))
+        .filter(Boolean)
+    );
+    sellerNames = (Array.isArray(result.sellerNames) ? result.sellerNames : []).map((seller) => {
+      if (
+        completedSellerIds.has(String(seller.unique_id || '')) &&
+        String(seller.status || '').trim().toLowerCase() !== 'found'
+      ) {
+        cacheChanged = true;
+        return { ...seller, status: 'Found' };
+      }
+      return seller;
+    });
+
+    if (cacheChanged) {
+      chrome.storage.local.set({ sellerData: storedSellerData, sellerNames });
+    }
+
     allData = mergeSellerNamesWithData(sellerNames, storedSellerData);
     categoryName = result.categoryName || '';
     // The displayed total must come from the same rows rendered in the table.
@@ -169,12 +196,30 @@ function hasFoundSellerEmail(seller) {
   return Boolean(email) && !email.includes('not found');
 }
 
+function hasCompletedSoldByLookup(seller) {
+  if (!seller) return false;
+
+  return [seller.email, seller.error_reason].some((value) => {
+    const normalized = String(value || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const isSoldByIssue = (
+      normalized.includes('sold & shipped by') ||
+      normalized.includes('sold and shipped by')
+    );
+    return isSoldByIssue && normalized.includes('not found');
+  });
+}
+
 function hasFoundSellerStatus(seller) {
   return Boolean(
     seller && (
       String(seller.status || '').trim().toLowerCase() === 'found' ||
       seller.is_existing_client === true ||
       seller.is_duplicate_seller === true ||
+      hasCompletedSoldByLookup(seller) ||
       hasFoundSellerEmail(seller)
     )
   );
