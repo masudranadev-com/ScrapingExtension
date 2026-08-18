@@ -1,9 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterLoaded) {
+if (window.__targetMailHunterVersion === "3.0.0") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
+window.__targetMailHunterVersion = "3.0.0";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -11,6 +12,7 @@ window.__targetMailHunterLoaded = true;
 // --------------------
 let shouldStopAutomation = false;
 let isAutomationRunning = false;
+let sellerDiscoveryPromise = null;
 
 // --------------------
 // Utility helpers
@@ -33,14 +35,16 @@ function click(selector) {
 // Message listener
 // --------------------
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === "START_AUTOMATION") {
+  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3") {
     if (isAutomationRunning) {
       console.log("⚠️ Automation already running, ignoring duplicate start");
       return;
     }
     shouldStopAutomation = false;
     runAutomation();
-  } else if (msg.action === "STOP_AUTOMATION") {
+  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3") {
+    startSellerDiscovery();
+  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3") {
     shouldStopAutomation = true;
     console.log("🛑 STOP requested by user");
   }
@@ -160,6 +164,11 @@ async function runAutomation() {
   console.log("🚀 Automation started");
 
   try {
+    // Wait for the popup-open discovery scan before starting the full run.
+    if (sellerDiscoveryPromise) {
+      await sellerDiscoveryPromise;
+    }
+
     // Extract and cache category info
     const categoryName = extractCategoryName();
     const breadcrumbSteps = extractBreadcrumbSteps();
@@ -225,26 +234,226 @@ function setStorage(obj) {
   });
 }
 
+function isMissingBusinessName(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return !normalized || normalized === "n/a" || normalized.startsWith("not found");
+}
+
+function hasFoundSellerEmail(seller) {
+  const email = String((seller && seller.email) || "").trim().toLowerCase();
+  return Boolean(email) && !email.includes("not found");
+}
+
+function getSellerBusinessName(input, sellerId) {
+  const candidates = [];
+
+  // Target renders the seller's display name in a sibling span inside the
+  // checkbox row, for example: styles_labelValue__FOIEK. The suffix changes,
+  // so match the stable class prefix instead of the complete class name.
+  const sellerRow = input.closest('div[class*="styles_col__"]');
+  const rowLabelValue = sellerRow && sellerRow.querySelector(
+    'span[class*="styles_labelValue__"]'
+  );
+  if (rowLabelValue) candidates.push(rowLabelValue.textContent);
+
+  if (input.labels) {
+    for (const label of input.labels) {
+      const labelValue = label.querySelector('span[class*="styles_labelValue__"]');
+      if (labelValue) candidates.push(labelValue.textContent);
+      candidates.push(label.textContent);
+    }
+  }
+
+  const closestLabel = input.closest("label");
+  if (closestLabel) candidates.push(closestLabel.textContent);
+
+  candidates.push(
+    input.getAttribute("aria-label"),
+    input.getAttribute("data-label"),
+    input.value,
+    input.nextElementSibling && input.nextElementSibling.textContent
+  );
+
+  for (const candidate of candidates) {
+    const name = String(candidate || "").replace(/\s+/g, " ").trim();
+    const normalized = name.toLowerCase();
+    if (
+      name &&
+      normalized !== "on" &&
+      normalized !== "true" &&
+      normalized !== "false" &&
+      !normalized.includes("include out of stock")
+    ) {
+      return name;
+    }
+  }
+
+  try {
+    return decodeURIComponent(sellerId).replace(/[_-]+/g, " ").trim() || sellerId;
+  } catch {
+    return sellerId;
+  }
+}
+
+function startSellerDiscovery() {
+  if (isAutomationRunning) return Promise.resolve(false);
+  if (sellerDiscoveryPromise) return sellerDiscoveryPromise;
+
+  sellerDiscoveryPromise = discoverSellerNames()
+    .catch((error) => {
+      console.error("Failed to discover seller names:", error);
+      return false;
+    })
+    .finally(() => {
+      sellerDiscoveryPromise = null;
+    });
+
+  return sellerDiscoveryPromise;
+}
+
+async function discoverSellerNames() {
+  // A previous Stop request should not block this lightweight scan.
+  shouldStopAutomation = false;
+
+  const categoryName = extractCategoryName();
+  const breadcrumbSteps = extractBreadcrumbSteps();
+  if (categoryName) {
+    await saveCategoryData(categoryName, breadcrumbSteps);
+  }
+
+  const opened = await openFiltersAndSellerPanel();
+  if (!opened) {
+    console.error("Could not open the seller panel for name discovery");
+    return false;
+  }
+
+  try {
+    await sleep(500);
+    const checkboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
+    const { sellerCheckboxes, skipped, disabled } = filterSellerCheckboxes(checkboxes);
+
+    console.log(`Discovered ${sellerCheckboxes.length} valid seller names`);
+    console.log(`Skipped out-of-stock option: ${skipped}; disabled: ${disabled}`);
+    await initializeSellerRows(sellerCheckboxes);
+    return true;
+  } finally {
+    const modal = getModal();
+    const closeButton = modal && (
+      modal.querySelector('[data-test="modal-close-button"]') ||
+      modal.querySelector('button[aria-label="close"], button[aria-label="Close"]')
+    );
+    if (closeButton) closeButton.click();
+  }
+}
+
+function filterSellerCheckboxes(inputs) {
+  let skipped = 0;
+  let disabled = 0;
+
+  const sellerCheckboxes = [...inputs].filter((input) => {
+    const dataTest = input.getAttribute("data-test") || "";
+    const inputValue = (input.value || "").toLowerCase();
+
+    if (
+      dataTest === "facet-checkbox-include_out_of_stock" ||
+      dataTest.includes("out_of_stock") ||
+      inputValue.includes("out of stock")
+    ) {
+      skipped++;
+      return false;
+    }
+
+    if (input.disabled || input.getAttribute("aria-disabled") === "true") {
+      disabled++;
+      return false;
+    }
+
+    return true;
+  });
+
+  return { sellerCheckboxes, skipped, disabled };
+}
+
+async function initializeSellerRows(sellerCheckboxes) {
+  const storedData = await getStorage("sellerData", []);
+  const existingData = Array.isArray(storedData) ? storedData : [];
+  const existingById = new Map(
+    existingData
+      .filter((seller) => seller && seller.unique_id)
+      .map((seller) => [String(seller.unique_id), seller])
+  );
+
+  const sellerRows = sellerCheckboxes.map((input, index) => {
+    const dataTest = input.getAttribute("data-test") || "";
+    const sellerId = dataTest.replace("facet-checkbox-", "");
+    const existingSeller = existingById.get(sellerId) || {};
+    const checkboxName = getSellerBusinessName(input, sellerId);
+    const sellerName = checkboxName || existingSeller.seller_name || "Not found";
+    const businessName = isMissingBusinessName(existingSeller.business_name)
+      ? sellerName
+      : existingSeller.business_name;
+
+    return {
+      seller_name: sellerName,
+      business_name: businessName || "Not found",
+      email: "Not found",
+      headquarters: "Not found",
+      mobile_number: "Not found",
+      store_link: "Not found",
+      error_reason: "",
+      ...existingSeller,
+      id: index + 1,
+      unique_id: sellerId,
+      seller_name: sellerName,
+      business_name: businessName || "Not found"
+    };
+  });
+
+  await setStorage({
+    sellerNames: sellerRows.map((seller) => ({
+      id: seller.id,
+      unique_id: seller.unique_id,
+      seller_name: seller.seller_name
+    })),
+    sellerData: sellerRows,
+    totalSellers: sellerRows.length
+  });
+  console.log(`Saved ${sellerRows.length} seller business names to the table data`);
+}
+
 async function saveSellerData(sellerData) {
-  const data = await getStorage("sellerData", []);
-  data.push({
+  const storedData = await getStorage("sellerData", []);
+  const data = Array.isArray(storedData) ? storedData : [];
+  const defaults = {
+    seller_name: "Not found",
     business_name: "Not found",
     email: "Not found",
     headquarters: "Not found",
     mobile_number: "Not found",
     store_link: "Not found",
-    error_reason: "",
-    ...sellerData
-  });
+    error_reason: ""
+  };
+  const existingIndex = sellerData.unique_id
+    ? data.findIndex((seller) => String(seller.unique_id) === String(sellerData.unique_id))
+    : -1;
+
+  if (existingIndex >= 0) {
+    const existingSeller = data[existingIndex];
+    const updatedSeller = { ...defaults, ...existingSeller, ...sellerData };
+
+    if (
+      isMissingBusinessName(sellerData.business_name) &&
+      !isMissingBusinessName(existingSeller.business_name)
+    ) {
+      updatedSeller.business_name = existingSeller.business_name;
+    }
+
+    data[existingIndex] = updatedSeller;
+  } else {
+    data.push({ ...defaults, ...sellerData });
+  }
+
   await setStorage({ sellerData: data });
-}
-
-async function setCurrentSellerIndex(index) {
-  await setStorage({ currentSellerIndex: index });
-}
-
-async function getCurrentSellerIndex() {
-  return getStorage("currentSellerIndex", 0);
 }
 
 async function logSellerDataAsJSON() {
@@ -715,64 +924,67 @@ async function collectSellerEmails() {
   console.log("🔍 Filtering seller checkboxes...");
 
   // Filter out "Include out of stock" and disabled checkboxes
-  let skipped = 0;
-  let disabled = 0;
-
-  const sellerCheckboxes = [...tempCheckboxes].filter((input) => {
-    const dataTest = input.getAttribute("data-test") || "";
-
-    // Filter out "Include out of stock" checkbox
-    const inputValue = (input.value || "").toLowerCase();
-    if (dataTest === "facet-checkbox-include_out_of_stock" || dataTest.includes("out_of_stock") || inputValue.includes("out of stock")) {
-      skipped++;
-      return false;
-    }
-
-    if (input.disabled || input.getAttribute("aria-disabled") === "true") {
-      disabled++;
-      return false;
-    }
-
-    return true;
-  });
+  const { sellerCheckboxes, skipped, disabled } = filterSellerCheckboxes(tempCheckboxes);
 
   console.log(`✅ Valid sellers found: ${sellerCheckboxes.length}`);
   console.log(`   - Skipped "Include out of stock": ${skipped}`);
   console.log(`   - Skipped disabled: ${disabled}`);
 
-  // Save total sellers count to storage
-  await setStorage({ totalSellers: sellerCheckboxes.length });
+  // Create all seller rows immediately, including names from checkbox labels.
+  // Later collection steps update these rows by unique_id instead of duplicating them.
+  await initializeSellerRows(sellerCheckboxes);
 
   if (sellerCheckboxes.length === 0) {
     console.warn("❌ No valid seller checkboxes found. Exiting.");
     return;
   }
 
-  let startIndex = await getCurrentSellerIndex();
-  if (startIndex < 0 || startIndex >= sellerCheckboxes.length) startIndex = 0;
+  const storedSellerData = await getStorage("sellerData", []);
+  const sellerById = new Map(
+    (Array.isArray(storedSellerData) ? storedSellerData : [])
+      .filter((seller) => seller && seller.unique_id)
+      .map((seller) => [String(seller.unique_id), seller])
+  );
+  const pendingSellerIds = new Set(
+    sellerCheckboxes
+      .map((input) => (input.getAttribute("data-test") || "").replace("facet-checkbox-", ""))
+      .filter((sellerId) => !hasFoundSellerEmail(sellerById.get(sellerId)))
+  );
+  const pendingSellerCount = pendingSellerIds.size;
+  let attemptedPendingCount = 0;
 
-  console.log(`🔄 Resuming from seller ${startIndex + 1} of ${sellerCheckboxes.length}`);
+  console.log(`Not Found sellers queued: ${pendingSellerCount}`);
 
-  for (let i = startIndex; i < sellerCheckboxes.length; i++) {
-    // Check if user requested stop
-    if (shouldStopAutomation) {
-      console.log("🛑 ========================================");
-      console.log("🛑 AUTOMATION STOPPED BY USER");
-      console.log("🛑 ========================================");
-      console.log(`📊 Processed ${i} of ${sellerCheckboxes.length} sellers before stopping`);
-      await logSellerDataAsJSON();
-      return;
-    }
+  if (pendingSellerCount === 0) {
+    console.log("All sellers already have a found email. Nothing to process.");
+    return;
+  }
 
+  for (let i = 0; i < sellerCheckboxes.length; i++) {
     const input = sellerCheckboxes[i];
     if (!input) continue;
 
     const dataTest = input.getAttribute("data-test") || "";
     const sellerId = dataTest.replace("facet-checkbox-", "");
+    if (!pendingSellerIds.has(sellerId)) continue;
+    pendingSellerIds.delete(sellerId);
+
+    // Check if user requested stop only when a pending seller is reached.
+    if (shouldStopAutomation) {
+      console.log("🛑 ========================================");
+      console.log("🛑 AUTOMATION STOPPED BY USER");
+      console.log("🛑 ========================================");
+      console.log(`📊 Attempted ${attemptedPendingCount} of ${pendingSellerCount} Not Found sellers`);
+      await logSellerDataAsJSON();
+      return;
+    }
+
+    attemptedPendingCount++;
+    const sellerName = getSellerBusinessName(input, sellerId);
 
     try {
       console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-      console.log(`🔄 [${i + 1}/${sellerCheckboxes.length}] Processing seller: ${sellerId}`);
+      console.log(`🔄 [${attemptedPendingCount}/${pendingSellerCount}] Processing Not Found seller: ${sellerName} (${sellerId})`);
       console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
 
       // Uncheck all currently checked seller checkboxes
@@ -783,7 +995,6 @@ async function collectSellerEmails() {
       if (!currentCheckbox) {
         console.error(`❌ Checkbox for ${sellerId} not found in DOM`);
         await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Checkbox missing" });
-        await setCurrentSellerIndex(i + 1);
         continue;
       }
 
@@ -804,7 +1015,6 @@ async function collectSellerEmails() {
       if (!onProductListing) {
         console.error(`❌ Failed to return to product listing for seller ${i + 1}`);
         await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Navigation failed" });
-        await setCurrentSellerIndex(i + 1);
         continue;
       }
 
@@ -817,7 +1027,6 @@ async function collectSellerEmails() {
           email: "Not found",
           store_link: "Not found"
         });
-        await setCurrentSellerIndex(i + 1);
 
         // Re-open filters for next seller
         await openFiltersAndSellerPanel();
@@ -876,9 +1085,7 @@ async function collectSellerEmails() {
         await saveSellerData(finalSellerData);
       }
 
-      await setCurrentSellerIndex(i + 1);
-
-      console.log(`✅ [${i + 1}/${sellerCheckboxes.length}] Seller ${i + 1} completed`);
+      console.log(`✅ [${attemptedPendingCount}/${pendingSellerCount}] ${sellerName} completed`);
       console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
       // We're still on main page! Re-open filters for next seller
@@ -890,7 +1097,7 @@ async function collectSellerEmails() {
         console.log("🛑 ========================================");
         console.log("🛑 AUTOMATION STOPPED BY USER");
         console.log("🛑 ========================================");
-        console.log(`📊 Processed ${i + 1} of ${sellerCheckboxes.length} sellers before stopping`);
+        console.log(`📊 Attempted ${attemptedPendingCount} of ${pendingSellerCount} Not Found sellers`);
         await logSellerDataAsJSON();
         return;
       }
@@ -903,7 +1110,6 @@ async function collectSellerEmails() {
         if (!stillOnListing) {
           console.error("❌ Could not recover product listing, but continuing to next seller...");
           await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Page recovery failed" });
-          await setCurrentSellerIndex(i + 1);
           // Try reloading the page and reopening filters
           window.location.reload();
           await sleep(5000);
@@ -936,7 +1142,6 @@ async function collectSellerEmails() {
           email: "Not found - Unexpected error",
           store_link: "Not found"
         });
-        await setCurrentSellerIndex(i + 1);
       } catch (saveError) {
         console.error("❌ Even saving failed:", saveError);
       }
@@ -964,7 +1169,7 @@ async function collectSellerEmails() {
   console.log("🎉 ========================================");
   console.log("🎉 ALL SELLERS COMPLETED! DONE!");
   console.log("🎉 ========================================");
-  console.log(`📊 Total sellers processed: ${sellerCheckboxes.length}`);
+  console.log(`📊 Not Found sellers attempted: ${attemptedPendingCount}`);
   console.log("");
 
   await logSellerDataAsJSON();
@@ -973,8 +1178,6 @@ async function collectSellerEmails() {
   console.log("💾 Data saved in chrome.storage.local (key: 'sellerData')");
   console.log("✅ Script execution finished.");
 
-  // Reset index for next run
-  await setCurrentSellerIndex(0);
 }
 
 } // end of duplicate injection guard

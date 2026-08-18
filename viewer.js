@@ -2,9 +2,20 @@ let allData = [];
 let filteredData = [];
 let categoryName = '';
 let totalSellers = 0;
+let sellerNames = [];
 
 // Load data on page load
 window.addEventListener('DOMContentLoaded', loadData);
+
+// Keep the table current while content.js discovers and processes sellers.
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (
+    areaName === 'local' &&
+    (changes.sellerNames || changes.sellerData || changes.totalSellers || changes.categoryName || changes.breadcrumbSteps)
+  ) {
+    loadData();
+  }
+});
 
 // Search functionality
 const searchBox = document.getElementById('searchBox');
@@ -32,6 +43,7 @@ function applySearch() {
   } else {
     filteredData = allData.filter(seller => {
       return (
+        (seller.seller_name && seller.seller_name.toLowerCase().includes(query)) ||
         (seller.business_name && seller.business_name.toLowerCase().includes(query)) ||
         (seller.email && seller.email.toLowerCase().includes(query)) ||
         (seller.mobile_number && seller.mobile_number.toLowerCase().includes(query)) ||
@@ -71,7 +83,7 @@ function getFilePrefix() {
 // Clear data
 document.getElementById('clearData').addEventListener('click', () => {
   if (confirm('Are you sure you want to delete ALL seller data? This cannot be undone!')) {
-    chrome.storage.local.remove(['sellerData', 'currentSellerIndex', 'categoryName', 'breadcrumbSteps', 'totalSellers'], () => {
+    chrome.storage.local.remove(['sellerNames', 'sellerData', 'currentSellerIndex', 'categoryName', 'breadcrumbSteps', 'totalSellers'], () => {
       console.log('All data cleared');
       loadData();
     });
@@ -80,16 +92,60 @@ document.getElementById('clearData').addEventListener('click', () => {
 
 // Load data from chrome.storage
 function loadData() {
-  chrome.storage.local.get(['sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers'], (result) => {
-    allData = Array.isArray(result.sellerData) ? result.sellerData : [];
+  chrome.storage.local.get(['sellerNames', 'sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers'], (result) => {
+    const storedSellerData = Array.isArray(result.sellerData) ? result.sellerData : [];
+    sellerNames = Array.isArray(result.sellerNames) ? result.sellerNames : [];
+    allData = mergeSellerNamesWithData(sellerNames, storedSellerData);
     categoryName = result.categoryName || '';
-    totalSellers = result.totalSellers || 0;
+    // The displayed total must come from the same rows rendered in the table.
+    totalSellers = allData.length;
     const breadcrumbSteps = result.breadcrumbSteps || [];
     applySearch();
     renderCategoryInfo(categoryName, breadcrumbSteps);
     renderTable();
     updateStats();
   });
+}
+
+function mergeSellerNamesWithData(nameRows, dataRows) {
+  if (nameRows.length === 0) return dataRows;
+
+  const dataBySellerId = new Map(
+    dataRows
+      .filter((seller) => seller && seller.unique_id)
+      .map((seller) => [String(seller.unique_id), seller])
+  );
+
+  const mergedRows = nameRows.map((nameRow, index) => {
+    const sellerId = String(nameRow.unique_id || '');
+    const collectedData = dataBySellerId.get(sellerId) || {};
+
+    return {
+      email: 'Not found',
+      headquarters: 'Not found',
+      mobile_number: 'Not found',
+      store_link: 'Not found',
+      error_reason: '',
+      ...collectedData,
+      id: nameRow.id || collectedData.id || index + 1,
+      unique_id: nameRow.unique_id || collectedData.unique_id || '',
+      seller_name: nameRow.seller_name || collectedData.seller_name || collectedData.business_name || 'Not found'
+    };
+  });
+
+  const knownSellerIds = new Set(
+    nameRows.map((seller) => String(seller.unique_id || ''))
+  );
+  const unmatchedData = dataRows.filter(
+    (seller) => !knownSellerIds.has(String(seller.unique_id || ''))
+  );
+
+  return [...mergedRows, ...unmatchedData];
+}
+
+function hasFoundSellerEmail(seller) {
+  const email = String((seller && seller.email) || '').trim().toLowerCase();
+  return Boolean(email) && !email.includes('not found');
 }
 
 // Render category info
@@ -123,8 +179,13 @@ function removeSeller(index) {
 
   allData.splice(index, 1);
   totalSellers = allData.length;
+  sellerNames = allData.map((seller, sellerIndex) => ({
+    id: sellerIndex + 1,
+    unique_id: seller.unique_id || '',
+    seller_name: seller.seller_name || seller.business_name || 'Not found'
+  }));
 
-  chrome.storage.local.set({ sellerData: allData, totalSellers }, () => {
+  chrome.storage.local.set({ sellerNames, sellerData: allData, totalSellers }, () => {
     if (chrome.runtime.lastError) {
       alert(`Failed to remove seller: ${chrome.runtime.lastError.message}`);
       loadData();
@@ -153,7 +214,7 @@ function renderTable() {
 
   tableBody.innerHTML = filteredData.map((seller, index) => {
     const sourceIndex = allData.indexOf(seller);
-    const hasEmail = seller.email && !seller.email.includes('Not found');
+    const hasEmail = hasFoundSellerEmail(seller);
     const statusBadge = hasEmail
       ? '<span class="badge badge-success">✓ Found</span>'
       : '<span class="badge badge-danger">✗ Not Found</span>';
@@ -162,7 +223,7 @@ function renderTable() {
       <tr data-index="${sourceIndex}">
         <td>${escapeHTML(seller.id || index + 1)}</td>
         <td><code>${escapeHTML(seller.unique_id || 'N/A')}</code></td>
-        <td class="cell-long">${escapeHTML(seller.business_name || 'N/A')}</td>
+        <td class="cell-long">${escapeHTML(seller.seller_name || seller.business_name || 'N/A')}</td>
         <td class="cell-long">${escapeHTML(seller.email || 'N/A')}</td>
         <td class="cell-long">${escapeHTML(seller.mobile_number || 'N/A')}</td>
         <td class="cell-long">${escapeHTML(seller.headquarters || 'N/A')}</td>
@@ -190,7 +251,7 @@ function renderTable() {
 
 // Update statistics
 function updateStats() {
-  const emailCount = allData.filter(s => s.email && !s.email.includes('Not found')).length;
+  const emailCount = allData.filter(hasFoundSellerEmail).length;
 
   document.getElementById('totalCount').textContent = allData.length;
   document.getElementById('emailCount').textContent = emailCount;
