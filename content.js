@@ -1,10 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterVersion === "7.0.0") {
+if (window.__targetMailHunterVersion === "8.0.0") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
-window.__targetMailHunterVersion = "7.0.0";
+window.__targetMailHunterVersion = "8.0.0";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -35,16 +35,16 @@ function click(selector) {
 // Message listener
 // --------------------
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3" || msg.action === "START_AUTOMATION_V4" || msg.action === "START_AUTOMATION_V5" || msg.action === "START_AUTOMATION_V6" || msg.action === "START_AUTOMATION_V7") {
+  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3" || msg.action === "START_AUTOMATION_V4" || msg.action === "START_AUTOMATION_V5" || msg.action === "START_AUTOMATION_V6" || msg.action === "START_AUTOMATION_V7" || msg.action === "START_AUTOMATION_V8") {
     if (isAutomationRunning) {
       console.log("⚠️ Automation already running, ignoring duplicate start");
       return;
     }
     shouldStopAutomation = false;
     runAutomation();
-  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3" || msg.action === "COLLECT_SELLER_NAMES_V4" || msg.action === "COLLECT_SELLER_NAMES_V5" || msg.action === "COLLECT_SELLER_NAMES_V6" || msg.action === "COLLECT_SELLER_NAMES_V7") {
+  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3" || msg.action === "COLLECT_SELLER_NAMES_V4" || msg.action === "COLLECT_SELLER_NAMES_V5" || msg.action === "COLLECT_SELLER_NAMES_V6" || msg.action === "COLLECT_SELLER_NAMES_V7" || msg.action === "COLLECT_SELLER_NAMES_V8") {
     startSellerDiscovery();
-  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3" || msg.action === "STOP_AUTOMATION_V4" || msg.action === "STOP_AUTOMATION_V5" || msg.action === "STOP_AUTOMATION_V6" || msg.action === "STOP_AUTOMATION_V7") {
+  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3" || msg.action === "STOP_AUTOMATION_V4" || msg.action === "STOP_AUTOMATION_V5" || msg.action === "STOP_AUTOMATION_V6" || msg.action === "STOP_AUTOMATION_V7" || msg.action === "STOP_AUTOMATION_V8") {
     shouldStopAutomation = true;
     console.log("🛑 STOP requested by user");
   }
@@ -708,6 +708,26 @@ function waitForSelector(selector, timeout = 15000) {
   });
 }
 
+async function waitForFirstProductLink(timeout = 30000, pollInterval = 500) {
+  console.log(`Waiting up to ${Math.round(timeout / 1000)} seconds for a product...`);
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    if (shouldStopAutomation) return null;
+
+    const productLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
+    if (productLink && productLink.href) {
+      console.log(`Product found after ${Math.ceil((Date.now() - start) / 1000)} second(s)`);
+      return productLink;
+    }
+
+    await sleep(pollInterval);
+  }
+
+  console.warn(`No product appeared within ${Math.round(timeout / 1000)} seconds`);
+  return null;
+}
+
 // --------------------
 // Uncheck all checked seller checkboxes
 // --------------------
@@ -1253,22 +1273,17 @@ async function collectSellerEmails() {
       click('[data-test="@web/FacetModalButtons/ApplyButton"]');
       await sleep(2000);
 
-      // Verify we're back on product listing
-      const onProductListing = await verifyProductListingPage(8000);
-      if (!onProductListing) {
-        console.error(`❌ Failed to return to product listing for seller ${i + 1}`);
-        await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Navigation failed" });
-        continue;
-      }
-
-      const firstProductLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
+      // Product results can load slowly after applying a seller. Wait for up to
+      // 30 seconds before deciding that this seller has no product to open.
+      const firstProductLink = await waitForFirstProductLink(30000);
       if (!firstProductLink) {
-        console.warn(`⚠️ No product link for seller ${i + 1}`);
+        console.warn(`⚠️ No product link for ${sellerName} after waiting 30 seconds`);
         await saveSellerData({
           id: i + 1,
           unique_id: sellerId,
-          email: "Not found",
-          store_link: "Not found"
+          email: "Not found - No products after 30 seconds",
+          store_link: "Not found",
+          error_reason: "No product appeared after waiting 30 seconds"
         });
 
         // Re-open filters for next seller

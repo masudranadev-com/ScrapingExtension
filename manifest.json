@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Target Mail Hunter",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Automates seller email collection from Target marketplace",
 
   "permissions": ["activeTab", "scripting", "storage"],
