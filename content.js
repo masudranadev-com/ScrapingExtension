@@ -1,10 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterVersion === "3.0.0") {
+if (window.__targetMailHunterVersion === "7.0.0") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
-window.__targetMailHunterVersion = "3.0.0";
+window.__targetMailHunterVersion = "7.0.0";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -35,16 +35,16 @@ function click(selector) {
 // Message listener
 // --------------------
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3") {
+  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3" || msg.action === "START_AUTOMATION_V4" || msg.action === "START_AUTOMATION_V5" || msg.action === "START_AUTOMATION_V6" || msg.action === "START_AUTOMATION_V7") {
     if (isAutomationRunning) {
       console.log("⚠️ Automation already running, ignoring duplicate start");
       return;
     }
     shouldStopAutomation = false;
     runAutomation();
-  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3") {
+  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3" || msg.action === "COLLECT_SELLER_NAMES_V4" || msg.action === "COLLECT_SELLER_NAMES_V5" || msg.action === "COLLECT_SELLER_NAMES_V6" || msg.action === "COLLECT_SELLER_NAMES_V7") {
     startSellerDiscovery();
-  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3") {
+  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3" || msg.action === "STOP_AUTOMATION_V4" || msg.action === "STOP_AUTOMATION_V5" || msg.action === "STOP_AUTOMATION_V6" || msg.action === "STOP_AUTOMATION_V7") {
     shouldStopAutomation = true;
     console.log("🛑 STOP requested by user");
   }
@@ -176,6 +176,16 @@ async function runAutomation() {
       await saveCategoryData(categoryName, breadcrumbSteps);
     }
 
+    const cachedCatalog = await getCachedSellerCatalog(null, categoryName || "");
+    if (cachedCatalog.valid && !cachedCatalog.clientNameCheckSucceeded) {
+      console.log("Retrying SignalDock validation from the cached seller catalog...");
+      const refreshedStatus = await refreshCachedSignalDockStatuses(cachedCatalog);
+      if (!refreshedStatus.clientNameCheckSucceeded) {
+        console.error("Stopping before opening filters: SignalDock validation failed");
+        return;
+      }
+    }
+
     // Open Filters + Seller panel with retries
     const opened = await openFiltersAndSellerPanel();
     if (!opened) {
@@ -242,6 +252,111 @@ function isMissingBusinessName(value) {
 function hasFoundSellerEmail(seller) {
   const email = String((seller && seller.email) || "").trim().toLowerCase();
   return Boolean(email) && !email.includes("not found");
+}
+
+function normalizeSellerName(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function hasFoundSellerStatus(seller) {
+  return Boolean(
+    seller && (
+      String(seller.status || "").trim().toLowerCase() === "found" ||
+      seller.is_existing_client === true ||
+      seller.is_duplicate_seller === true ||
+      hasFoundSellerEmail(seller)
+    )
+  );
+}
+
+async function getSignalDockClientNames() {
+  const [cachedNames, cachedSuccess, cachedError] = await Promise.all([
+    getStorage("signalDockClientNames", []),
+    getStorage("signalDockClientNamesSucceeded", false),
+    getStorage("signalDockClientNamesError", "")
+  ]);
+
+  if (cachedSuccess === true && Array.isArray(cachedNames)) {
+    console.log(`[SignalDock] Using ${cachedNames.length} names fetched by the extension popup`);
+    return { success: true, names: cachedNames, error: "" };
+  }
+
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: "GET_SIGNALDOCK_CLIENT_NAMES" }, (response) => {
+      if (chrome.runtime.lastError) {
+        const backgroundError = chrome.runtime.lastError.message;
+        const error = cachedError
+          ? `Popup fetch failed: ${cachedError}; background fallback failed: ${backgroundError}`
+          : `Background fallback failed: ${backgroundError}`;
+        console.error("[SignalDock]", error);
+        resolve({ success: false, names: [], error });
+        return;
+      }
+
+      if (!response || response.success !== true || !Array.isArray(response.names)) {
+        const error = response && response.error ? response.error : "Invalid SignalDock response";
+        console.error("[SignalDock] Background fallback failed:", error);
+        resolve({ success: false, names: [], error });
+        return;
+      }
+
+      setStorage({
+        signalDockClientNames: response.names,
+        signalDockClientNamesSucceeded: true,
+        signalDockClientNamesError: "",
+        signalDockClientNamesCheckedAt: new Date().toISOString()
+      }).then(() => {
+        console.log(`[SignalDock] Background fallback loaded ${response.names.length} names`);
+        resolve({ success: true, names: response.names, error: "" });
+      });
+    });
+  });
+}
+
+async function getCachedSellerCatalog(expectedSellerCount = null, currentCategoryName = "") {
+  const [totalValue, sellerNamesValue, sellerDataValue, checkSucceeded, cachedCategoryName, newSellersValue] = await Promise.all([
+    getStorage("totalSellers", 0),
+    getStorage("sellerNames", []),
+    getStorage("sellerData", []),
+    getStorage("clientNameCheckSucceeded", false),
+    getStorage("sellerCatalogCategoryName", ""),
+    getStorage("newSellers", 0)
+  ]);
+
+  const totalSellers = Number(totalValue);
+  const sellerNames = Array.isArray(sellerNamesValue) ? sellerNamesValue : [];
+  const sellerData = Array.isArray(sellerDataValue) ? sellerDataValue : [];
+  const hasCompleteNames = (
+    Number.isInteger(totalSellers) &&
+    totalSellers > 0 &&
+    sellerNames.length === totalSellers &&
+    sellerData.length === totalSellers &&
+    sellerNames.every((seller) => (
+      seller &&
+      String(seller.unique_id || "").trim() &&
+      !isMissingBusinessName(seller.seller_name)
+    ))
+  );
+  const countMatches = expectedSellerCount === null || totalSellers === expectedSellerCount;
+  const categoryMatches = (
+    !currentCategoryName ||
+    normalizeSellerName(currentCategoryName) === normalizeSellerName(cachedCategoryName)
+  );
+  const valid = hasCompleteNames && countMatches && categoryMatches;
+
+  return {
+    valid,
+    totalSellers,
+    sellerNames,
+    sellerData,
+    newSellerCount: Number(newSellersValue) || 0,
+    clientNameCheckSucceeded: checkSucceeded === true,
+    cachedCategoryName: String(cachedCategoryName || "")
+  };
 }
 
 function getSellerBusinessName(input, sellerId) {
@@ -316,6 +431,16 @@ async function discoverSellerNames() {
   shouldStopAutomation = false;
 
   const categoryName = extractCategoryName();
+  const cachedCatalog = await getCachedSellerCatalog(null, categoryName || "");
+  if (cachedCatalog.valid) {
+    console.log(`Using cached seller catalog (${cachedCatalog.totalSellers} sellers); modal scan skipped`);
+    const refreshedStatus = await refreshCachedSignalDockStatuses(cachedCatalog);
+    if (!refreshedStatus.clientNameCheckSucceeded) {
+      console.error("[SignalDock] Cached seller status refresh failed:", refreshedStatus.clientNameCheckError);
+    }
+    return true;
+  }
+
   const breadcrumbSteps = extractBreadcrumbSteps();
   if (categoryName) {
     await saveCategoryData(categoryName, breadcrumbSteps);
@@ -334,8 +459,8 @@ async function discoverSellerNames() {
 
     console.log(`Discovered ${sellerCheckboxes.length} valid seller names`);
     console.log(`Skipped out-of-stock option: ${skipped}; disabled: ${disabled}`);
-    await initializeSellerRows(sellerCheckboxes);
-    return true;
+    const initialization = await initializeSellerRows(sellerCheckboxes);
+    return initialization.clientNameCheckSucceeded;
   } finally {
     const modal = getModal();
     const closeButton = modal && (
@@ -374,6 +499,70 @@ function filterSellerCheckboxes(inputs) {
   return { sellerCheckboxes, skipped, disabled };
 }
 
+function applySignalDockResult(sellerRows, clientCheck) {
+  let newSellerCount = 0;
+
+  if (clientCheck.success) {
+    const existingClientNames = new Set(
+      clientCheck.names
+        .map(normalizeSellerName)
+        .filter(Boolean)
+    );
+    const seenCurrentSellerNames = new Set();
+
+    for (const seller of sellerRows) {
+      const normalizedName = normalizeSellerName(seller.seller_name);
+      const isExistingClient = existingClientNames.has(normalizedName);
+      const isDuplicateSeller = seenCurrentSellerNames.has(normalizedName);
+      seenCurrentSellerNames.add(normalizedName);
+
+      seller.is_existing_client = isExistingClient;
+      seller.is_duplicate_seller = isDuplicateSeller;
+      seller.is_new_seller = !isExistingClient && !isDuplicateSeller;
+      seller.status = (
+        isExistingClient ||
+        isDuplicateSeller ||
+        hasFoundSellerEmail(seller)
+      ) ? "Found" : "Not Found";
+
+      if (seller.is_new_seller) newSellerCount++;
+    }
+
+    console.log(`SignalDock matched ${sellerRows.length - newSellerCount} existing/duplicate sellers`);
+    console.log(`SignalDock found ${newSellerCount} unique new sellers`);
+  } else {
+    for (const seller of sellerRows) {
+      seller.status = hasFoundSellerStatus(seller) ? "Found" : "Not Found";
+      seller.is_new_seller = seller.is_new_seller === true;
+    }
+    newSellerCount = sellerRows.filter((seller) => seller.is_new_seller).length;
+    console.error(`SignalDock client-name check failed: ${clientCheck.error}`);
+  }
+
+  return newSellerCount;
+}
+
+async function refreshCachedSignalDockStatuses(cachedCatalog) {
+  const sellerRows = cachedCatalog.sellerData.map((seller) => ({ ...seller }));
+  const clientCheck = await getSignalDockClientNames();
+  const newSellerCount = applySignalDockResult(sellerRows, clientCheck);
+
+  await setStorage({
+    sellerData: sellerRows,
+    newSellers: newSellerCount,
+    clientNameCheckSucceeded: clientCheck.success,
+    clientNameCheckError: clientCheck.error || "",
+    clientNameCheckedAt: new Date().toISOString()
+  });
+
+  return {
+    sellerRows,
+    clientNameCheckSucceeded: clientCheck.success,
+    clientNameCheckError: clientCheck.error || "",
+    newSellerCount
+  };
+}
+
 async function initializeSellerRows(sellerCheckboxes) {
   const storedData = await getStorage("sellerData", []);
   const existingData = Array.isArray(storedData) ? storedData : [];
@@ -401,6 +590,10 @@ async function initializeSellerRows(sellerCheckboxes) {
       mobile_number: "Not found",
       store_link: "Not found",
       error_reason: "",
+      status: "Not Found",
+      is_existing_client: false,
+      is_duplicate_seller: false,
+      is_new_seller: false,
       ...existingSeller,
       id: index + 1,
       unique_id: sellerId,
@@ -409,16 +602,37 @@ async function initializeSellerRows(sellerCheckboxes) {
     };
   });
 
+  const clientCheck = await getSignalDockClientNames();
+  const newSellerCount = applySignalDockResult(sellerRows, clientCheck);
+
+  const sellerCatalogCategoryName = extractCategoryName() || await getStorage("categoryName", "");
+
   await setStorage({
     sellerNames: sellerRows.map((seller) => ({
       id: seller.id,
       unique_id: seller.unique_id,
-      seller_name: seller.seller_name
+      seller_name: seller.seller_name,
+      status: seller.status,
+      is_existing_client: seller.is_existing_client,
+      is_duplicate_seller: seller.is_duplicate_seller,
+      is_new_seller: seller.is_new_seller
     })),
     sellerData: sellerRows,
-    totalSellers: sellerRows.length
+    totalSellers: sellerRows.length,
+    newSellers: newSellerCount,
+    clientNameCheckSucceeded: clientCheck.success,
+    clientNameCheckError: clientCheck.error || "",
+    clientNameCheckedAt: new Date().toISOString(),
+    sellerCatalogCategoryName
   });
   console.log(`Saved ${sellerRows.length} seller business names to the table data`);
+
+  return {
+    sellerRows,
+    clientNameCheckSucceeded: clientCheck.success,
+    clientNameCheckError: clientCheck.error || "",
+    newSellerCount
+  };
 }
 
 async function saveSellerData(sellerData) {
@@ -431,7 +645,11 @@ async function saveSellerData(sellerData) {
     headquarters: "Not found",
     mobile_number: "Not found",
     store_link: "Not found",
-    error_reason: ""
+    error_reason: "",
+    status: "Not Found",
+    is_existing_client: false,
+    is_duplicate_seller: false,
+    is_new_seller: false
   };
   const existingIndex = sellerData.unique_id
     ? data.findIndex((seller) => String(seller.unique_id) === String(sellerData.unique_id))
@@ -448,9 +666,12 @@ async function saveSellerData(sellerData) {
       updatedSeller.business_name = existingSeller.business_name;
     }
 
+    updatedSeller.status = hasFoundSellerStatus(updatedSeller) ? "Found" : "Not Found";
     data[existingIndex] = updatedSeller;
   } else {
-    data.push({ ...defaults, ...sellerData });
+    const newSeller = { ...defaults, ...sellerData };
+    newSeller.status = hasFoundSellerStatus(newSeller) ? "Found" : "Not Found";
+    data.push(newSeller);
   }
 
   await setStorage({ sellerData: data });
@@ -930,9 +1151,31 @@ async function collectSellerEmails() {
   console.log(`   - Skipped "Include out of stock": ${skipped}`);
   console.log(`   - Skipped disabled: ${disabled}`);
 
-  // Create all seller rows immediately, including names from checkbox labels.
-  // Later collection steps update these rows by unique_id instead of duplicating them.
-  await initializeSellerRows(sellerCheckboxes);
+  const currentCategoryName = extractCategoryName() || "";
+  const cachedCatalog = await getCachedSellerCatalog(
+    sellerCheckboxes.length,
+    currentCategoryName
+  );
+  let initialization;
+
+  if (cachedCatalog.valid) {
+    console.log(`Using cached seller catalog (${cachedCatalog.totalSellers} sellers); cache write skipped`);
+    initialization = {
+      sellerRows: cachedCatalog.sellerData,
+      clientNameCheckSucceeded: cachedCatalog.clientNameCheckSucceeded,
+      clientNameCheckError: "",
+      newSellerCount: cachedCatalog.newSellerCount
+    };
+  } else {
+    // Create seller rows and run SignalDock only when the catalog cache is missing,
+    // incomplete, belongs to another category, or the seller count changed.
+    initialization = await initializeSellerRows(sellerCheckboxes);
+  }
+
+  if (!initialization.clientNameCheckSucceeded) {
+    console.error("Stopping: SignalDock could not confirm which sellers are new");
+    return;
+  }
 
   if (sellerCheckboxes.length === 0) {
     console.warn("❌ No valid seller checkboxes found. Exiting.");
@@ -948,7 +1191,7 @@ async function collectSellerEmails() {
   const pendingSellerIds = new Set(
     sellerCheckboxes
       .map((input) => (input.getAttribute("data-test") || "").replace("facet-checkbox-", ""))
-      .filter((sellerId) => !hasFoundSellerEmail(sellerById.get(sellerId)))
+      .filter((sellerId) => !hasFoundSellerStatus(sellerById.get(sellerId)))
   );
   const pendingSellerCount = pendingSellerIds.size;
   let attemptedPendingCount = 0;

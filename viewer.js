@@ -3,6 +3,9 @@ let filteredData = [];
 let categoryName = '';
 let totalSellers = 0;
 let sellerNames = [];
+let newSellerCount = 0;
+let clientNameCheckSucceeded = null;
+let clientNameCheckError = '';
 
 // Load data on page load
 window.addEventListener('DOMContentLoaded', loadData);
@@ -11,7 +14,7 @@ window.addEventListener('DOMContentLoaded', loadData);
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (
     areaName === 'local' &&
-    (changes.sellerNames || changes.sellerData || changes.totalSellers || changes.categoryName || changes.breadcrumbSteps)
+    (changes.sellerNames || changes.sellerData || changes.totalSellers || changes.newSellers || changes.clientNameCheckSucceeded || changes.clientNameCheckError || changes.categoryName || changes.breadcrumbSteps)
   ) {
     loadData();
   }
@@ -83,7 +86,7 @@ function getFilePrefix() {
 // Clear data
 document.getElementById('clearData').addEventListener('click', () => {
   if (confirm('Are you sure you want to delete ALL seller data? This cannot be undone!')) {
-    chrome.storage.local.remove(['sellerNames', 'sellerData', 'currentSellerIndex', 'categoryName', 'breadcrumbSteps', 'totalSellers'], () => {
+    chrome.storage.local.remove(['sellerNames', 'sellerData', 'currentSellerIndex', 'categoryName', 'breadcrumbSteps', 'totalSellers', 'newSellers', 'clientNameCheckSucceeded', 'clientNameCheckError', 'clientNameCheckedAt', 'sellerCatalogCategoryName', 'signalDockClientNames', 'signalDockClientNamesSucceeded', 'signalDockClientNamesError', 'signalDockClientNamesCheckedAt'], () => {
       console.log('All data cleared');
       loadData();
     });
@@ -92,13 +95,21 @@ document.getElementById('clearData').addEventListener('click', () => {
 
 // Load data from chrome.storage
 function loadData() {
-  chrome.storage.local.get(['sellerNames', 'sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers'], (result) => {
+  chrome.storage.local.get(['sellerNames', 'sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers', 'newSellers', 'clientNameCheckSucceeded', 'clientNameCheckError'], (result) => {
     const storedSellerData = Array.isArray(result.sellerData) ? result.sellerData : [];
     sellerNames = Array.isArray(result.sellerNames) ? result.sellerNames : [];
     allData = mergeSellerNamesWithData(sellerNames, storedSellerData);
     categoryName = result.categoryName || '';
     // The displayed total must come from the same rows rendered in the table.
     totalSellers = allData.length;
+    newSellerCount = allData.filter((seller) => seller.is_new_seller === true).length;
+    clientNameCheckSucceeded = typeof result.clientNameCheckSucceeded === 'boolean'
+      ? result.clientNameCheckSucceeded
+      : null;
+    clientNameCheckError = result.clientNameCheckError || '';
+    if (clientNameCheckSucceeded === false) {
+      console.error('[SignalDock] API validation error:', clientNameCheckError);
+    }
     const breadcrumbSteps = result.breadcrumbSteps || [];
     applySearch();
     renderCategoryInfo(categoryName, breadcrumbSteps);
@@ -129,7 +140,17 @@ function mergeSellerNamesWithData(nameRows, dataRows) {
       ...collectedData,
       id: nameRow.id || collectedData.id || index + 1,
       unique_id: nameRow.unique_id || collectedData.unique_id || '',
-      seller_name: nameRow.seller_name || collectedData.seller_name || collectedData.business_name || 'Not found'
+      seller_name: nameRow.seller_name || collectedData.seller_name || collectedData.business_name || 'Not found',
+      status: collectedData.status || nameRow.status || 'Not Found',
+      is_existing_client: typeof collectedData.is_existing_client === 'boolean'
+        ? collectedData.is_existing_client
+        : nameRow.is_existing_client === true,
+      is_duplicate_seller: typeof collectedData.is_duplicate_seller === 'boolean'
+        ? collectedData.is_duplicate_seller
+        : nameRow.is_duplicate_seller === true,
+      is_new_seller: typeof collectedData.is_new_seller === 'boolean'
+        ? collectedData.is_new_seller
+        : nameRow.is_new_seller === true
     };
   });
 
@@ -146,6 +167,17 @@ function mergeSellerNamesWithData(nameRows, dataRows) {
 function hasFoundSellerEmail(seller) {
   const email = String((seller && seller.email) || '').trim().toLowerCase();
   return Boolean(email) && !email.includes('not found');
+}
+
+function hasFoundSellerStatus(seller) {
+  return Boolean(
+    seller && (
+      String(seller.status || '').trim().toLowerCase() === 'found' ||
+      seller.is_existing_client === true ||
+      seller.is_duplicate_seller === true ||
+      hasFoundSellerEmail(seller)
+    )
+  );
 }
 
 // Render category info
@@ -179,13 +211,18 @@ function removeSeller(index) {
 
   allData.splice(index, 1);
   totalSellers = allData.length;
+  newSellerCount = allData.filter((seller) => seller.is_new_seller === true).length;
   sellerNames = allData.map((seller, sellerIndex) => ({
     id: sellerIndex + 1,
     unique_id: seller.unique_id || '',
-    seller_name: seller.seller_name || seller.business_name || 'Not found'
+    seller_name: seller.seller_name || seller.business_name || 'Not found',
+    status: seller.status || 'Not Found',
+    is_existing_client: seller.is_existing_client === true,
+    is_duplicate_seller: seller.is_duplicate_seller === true,
+    is_new_seller: seller.is_new_seller === true
   }));
 
-  chrome.storage.local.set({ sellerNames, sellerData: allData, totalSellers }, () => {
+  chrome.storage.local.set({ sellerNames, sellerData: allData, totalSellers, newSellers: newSellerCount }, () => {
     if (chrome.runtime.lastError) {
       alert(`Failed to remove seller: ${chrome.runtime.lastError.message}`);
       loadData();
@@ -214,8 +251,8 @@ function renderTable() {
 
   tableBody.innerHTML = filteredData.map((seller, index) => {
     const sourceIndex = allData.indexOf(seller);
-    const hasEmail = hasFoundSellerEmail(seller);
-    const statusBadge = hasEmail
+    const hasFoundStatus = hasFoundSellerStatus(seller);
+    const statusBadge = hasFoundStatus
       ? '<span class="badge badge-success">✓ Found</span>'
       : '<span class="badge badge-danger">✗ Not Found</span>';
 
@@ -252,7 +289,15 @@ function renderTable() {
 // Update statistics
 function updateStats() {
   const emailCount = allData.filter(hasFoundSellerEmail).length;
+  const newSellersElement = document.getElementById('newSellers');
 
+  if (clientNameCheckSucceeded === false) {
+    newSellersElement.textContent = 'API Error';
+    newSellersElement.title = clientNameCheckError || 'SignalDock client-name check failed';
+  } else {
+    newSellersElement.textContent = newSellerCount;
+    newSellersElement.title = 'Unique seller names not returned by SignalDock';
+  }
   document.getElementById('totalCount').textContent = allData.length;
   document.getElementById('emailCount').textContent = emailCount;
 }
