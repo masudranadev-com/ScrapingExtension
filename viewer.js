@@ -335,13 +335,18 @@ function renderTable() {
 function updateStats() {
   const emailCount = allData.filter(hasFoundSellerEmail).length;
   const newSellersElement = document.getElementById('newSellers');
+  const apiErrorElement = document.getElementById('apiErrorMessage');
 
   if (clientNameCheckSucceeded === false) {
     newSellersElement.textContent = 'API Error';
     newSellersElement.title = clientNameCheckError || 'SignalDock client-name check failed';
+    apiErrorElement.textContent = `SignalDock API error: ${clientNameCheckError || 'Unknown error'}`;
+    apiErrorElement.style.display = 'block';
   } else {
     newSellersElement.textContent = newSellerCount;
     newSellersElement.title = 'Unique seller names not returned by SignalDock';
+    apiErrorElement.textContent = '';
+    apiErrorElement.style.display = 'none';
   }
   document.getElementById('totalCount').textContent = allData.length;
   document.getElementById('emailCount').textContent = emailCount;

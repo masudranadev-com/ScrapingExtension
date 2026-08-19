@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Target Mail Hunter",
-  "version": "1.7.2",
+  "version": "1.7.4",
   "description": "Automates seller email collection from Target marketplace",
 
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": [
     "https://www.target.com/*",
-    "http://localhost:3000/*"
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*"
   ],
 
   "background": {
