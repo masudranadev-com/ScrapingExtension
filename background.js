@@ -4,6 +4,8 @@ const SIGNALDOCK_CLIENT_NAMES_URL = "http://localhost:3000/target/client-names";
 const EXTENSION_LOG_STORAGE_KEY = "extensionLogs";
 const MAX_EXTENSION_LOG_ENTRIES = 3000;
 const MAX_EXTENSION_LOG_BYTES = 7 * 1024 * 1024;
+const PRODUCT_TAB_LOAD_TIMEOUT_MS = 45000;
+const PRODUCT_EXTRACTION_TIMEOUT_MS = 75000;
 let extensionLogWriteQueue = Promise.resolve();
 
 function retainLogsWithinLimits(logs) {
@@ -52,6 +54,285 @@ function appendExtensionLog(entry) {
 
 globalThis.TMHLogStore = { append: appendExtensionLog };
 
+function errorMessage(error) {
+  return error && error.message ? error.message : String(error || "Unknown error");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createProductTab(url, openerTabId, openerWindowId) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.create({
+      url,
+      active: false,
+      ...(Number.isInteger(openerTabId) ? { openerTabId } : {}),
+      ...(Number.isInteger(openerWindowId) ? { windowId: openerWindowId } : {})
+    }, (tab) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message));
+        return;
+      }
+      if (!tab || !Number.isInteger(tab.id)) {
+        reject(new Error("Chrome did not return a product tab ID"));
+        return;
+      }
+      resolve(tab);
+    });
+  });
+}
+
+function waitForTabComplete(tabId, timeoutMs = PRODUCT_TAB_LOAD_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+    };
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
+      finish(resolve, tab);
+    };
+
+    const onRemoved = (removedTabId) => {
+      if (removedTabId !== tabId) return;
+      finish(reject, new Error("Product tab was closed before it finished loading"));
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish(reject, new Error(`Product tab load timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+
+    // The tab can finish between chrome.tabs.create() and listener registration.
+    chrome.tabs.get(tabId, (tab) => {
+      if (settled) return;
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        finish(reject, new Error(runtimeError.message));
+        return;
+      }
+      if (tab && tab.status === "complete") finish(resolve, tab);
+    });
+  });
+}
+
+function navigateTabAndWait(tabId, url, timeoutMs = PRODUCT_TAB_LOAD_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      chrome.tabs.onRemoved.removeListener(onRemoved);
+    };
+
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
+      finish(resolve, tab);
+    };
+
+    const onRemoved = (removedTabId) => {
+      if (removedTabId !== tabId) return;
+      finish(reject, new Error("Product tab was closed during seller-page navigation"));
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish(reject, new Error(`Seller page navigation timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.update(tabId, { url }, (tab) => {
+      if (settled) return;
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        finish(reject, new Error(runtimeError.message));
+        return;
+      }
+      // Covers a cached navigation that completed before the update callback.
+      if (tab && tab.status === "complete" && tab.url === url) finish(resolve, tab);
+    });
+  });
+}
+
+function sendTabMessage(tabId, message, timeoutMs = PRODUCT_EXTRACTION_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`Product extraction timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function sendTabMessageWithRetries(tabId, message, attempts = 10, delayMs = 500) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await sendTabMessage(tabId, message);
+    } catch (error) {
+      lastError = error;
+      const messageText = errorMessage(error);
+      const receiverNotReady = /receiving end does not exist|could not establish connection/i.test(messageText);
+      if (!receiverNotReady || attempt === attempts) throw error;
+
+      console.warn(`Product content script is not ready (${attempt}/${attempts}); retrying...`);
+      await delay(delayMs);
+    }
+  }
+
+  throw lastError || new Error("Product content script did not become ready");
+}
+
+function closeTab(tabId) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve();
+      return;
+    }
+    chrome.tabs.remove(tabId, () => {
+      void chrome.runtime.lastError;
+      resolve();
+    });
+  });
+}
+
+function activateTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  chrome.tabs.update(tabId, { active: true }, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
+async function processTargetProduct(message, sender) {
+  const requestId = `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+  const openerWindowId = sender.tab && Number.isInteger(sender.tab.windowId)
+    ? sender.tab.windowId
+    : null;
+  let productTabId = null;
+  let phase = "validate-request";
+
+  try {
+    const productUrl = new URL(String(message.productUrl || ""));
+    if (productUrl.protocol !== "https:" || productUrl.hostname !== "www.target.com") {
+      throw new Error("The product URL is not an allowed Target URL");
+    }
+
+    console.log(`[Product ${requestId}] Phase: create-tab`, productUrl.href);
+    phase = "create-tab";
+    const productTab = await createProductTab(productUrl.href, openerTabId, openerWindowId);
+    productTabId = productTab.id;
+
+    console.log(`[Product ${requestId}] Phase: wait-for-load`, { productTabId });
+    phase = "wait-for-load";
+    const loadedTab = await waitForTabComplete(productTabId);
+
+    console.log(`[Product ${requestId}] Phase: discover-seller-link`, {
+      productTabId,
+      loadedUrl: loadedTab && loadedTab.url ? loadedTab.url : "unknown"
+    });
+    phase = "discover-seller-link";
+    const discovery = await sendTabMessageWithRetries(productTabId, {
+      action: "DISCOVER_PRODUCT_SELLER_V9",
+      requestId,
+      sellerId: String(message.sellerId || ""),
+      sellerIndex: Number(message.sellerIndex) || 0
+    });
+
+    if (!discovery || discovery.success !== true) {
+      throw new Error(discovery && discovery.error
+        ? discovery.error
+        : "Product tab returned an invalid seller-discovery response");
+    }
+
+    let sellerData = discovery.sellerData || null;
+    if (!sellerData) {
+      const sellerUrl = new URL(String(discovery.sellerUrl || ""));
+      if (sellerUrl.protocol !== "https:" || sellerUrl.hostname !== "www.target.com") {
+        throw new Error("The discovered seller URL is not an allowed Target URL");
+      }
+
+      console.log(`[Product ${requestId}] Phase: navigate-seller-page`, sellerUrl.href);
+      phase = "navigate-seller-page";
+      const sellerTab = await navigateTabAndWait(productTabId, sellerUrl.href);
+
+      console.log(`[Product ${requestId}] Phase: extract-contact`, {
+        productTabId,
+        loadedUrl: sellerTab && sellerTab.url ? sellerTab.url : "unknown"
+      });
+      phase = "extract-contact";
+      const contactResponse = await sendTabMessageWithRetries(productTabId, {
+        action: "EXTRACT_SELLER_CONTACT_V9",
+        requestId,
+        sellerId: String(message.sellerId || ""),
+        sellerIndex: Number(message.sellerIndex) || 0
+      });
+
+      if (!contactResponse || contactResponse.success !== true || !contactResponse.sellerData) {
+        throw new Error(contactResponse && contactResponse.error
+          ? contactResponse.error
+          : "Seller page returned an invalid contact-extraction response");
+      }
+      sellerData = contactResponse.sellerData;
+    }
+
+    console.log(`[Product ${requestId}] Phase: complete`, { productTabId });
+    return { success: true, sellerData, requestId };
+  } catch (error) {
+    console.error(`[Product ${requestId}] Failed during ${phase}:`, error);
+    return {
+      success: false,
+      error: errorMessage(error),
+      phase,
+      requestId
+    };
+  } finally {
+    if (productTabId !== null) {
+      console.log(`[Product ${requestId}] Phase: close-tab`, { productTabId });
+      await closeTab(productTabId);
+    }
+    activateTab(openerTabId);
+  }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "APPEND_EXTENSION_LOG") {
     const entry = {
@@ -59,6 +340,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId: sender.tab && sender.tab.id !== undefined ? sender.tab.id : null
     };
     appendExtensionLog(entry).then(() => sendResponse({ success: true }));
+    return true;
+  }
+
+  if (message.action === "PROCESS_TARGET_PRODUCT_V9") {
+    processTargetProduct(message, sender).then(sendResponse);
     return true;
   }
 

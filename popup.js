@@ -258,7 +258,7 @@ async function sendSellerDiscoveryMessage() {
   const loaded = await ensureLatestContentScript(tab.id);
   if (!loaded) return;
 
-  chrome.tabs.sendMessage(tab.id, { action: "COLLECT_SELLER_NAMES_V8" }, () => {
+  chrome.tabs.sendMessage(tab.id, { action: "COLLECT_SELLER_NAMES_V9" }, () => {
     void chrome.runtime.lastError;
   });
 }
@@ -279,13 +279,13 @@ startButton.addEventListener("click", async () => {
     const loaded = await ensureLatestContentScript(tab.id);
     if (!loaded) return;
 
-    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V8" }, () => {
+    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V9" }, () => {
       if (chrome.runtime.lastError) return;
       window.close();
     });
   } else {
     // Stop automation
-    chrome.tabs.sendMessage(tab.id, { action: "STOP_AUTOMATION_V8" }, () => {
+    chrome.tabs.sendMessage(tab.id, { action: "STOP_AUTOMATION_V9" }, () => {
       if (chrome.runtime.lastError) {
         console.warn("Content script not available:", chrome.runtime.lastError.message);
       }

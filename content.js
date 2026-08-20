@@ -1,10 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterVersion === "8.0.2") {
+if (window.__targetMailHunterVersion === "9.0.0") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
-window.__targetMailHunterVersion = "8.0.2";
+window.__targetMailHunterVersion = "9.0.0";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -34,20 +34,50 @@ function click(selector) {
 // --------------------
 // Message listener
 // --------------------
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3" || msg.action === "START_AUTOMATION_V4" || msg.action === "START_AUTOMATION_V5" || msg.action === "START_AUTOMATION_V6" || msg.action === "START_AUTOMATION_V7" || msg.action === "START_AUTOMATION_V8") {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === "DISCOVER_PRODUCT_SELLER_V9" || msg.action === "EXTRACT_SELLER_CONTACT_V9") {
+    const requestId = msg.requestId || "unknown-request";
+    const isDiscovery = msg.action === "DISCOVER_PRODUCT_SELLER_V9";
+    console.log(`[Product ${requestId}] Content script received ${isDiscovery ? "seller discovery" : "contact extraction"} request`, {
+      readyState: document.readyState,
+      pageUrl: window.location.href
+    });
+
+    const task = isDiscovery
+      ? discoverSellerFromCurrentProduct(msg.sellerId, msg.sellerIndex, requestId)
+      : extractSellerContactFromCurrentPage(msg.sellerId, msg.sellerIndex, requestId);
+
+    task
+      .then((result) => {
+        if (!result || (!result.sellerData && !result.sellerUrl)) {
+          throw new Error("Product workflow step finished without seller data or a seller URL");
+        }
+        sendResponse({ success: true, ...result });
+      })
+      .catch((error) => {
+        const errorText = error && error.message ? error.message : String(error);
+        console.error(`[Product ${requestId}] Content extraction failed:`, error);
+        sendResponse({ success: false, error: errorText });
+      });
+
+    return true;
+  }
+
+  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3" || msg.action === "START_AUTOMATION_V4" || msg.action === "START_AUTOMATION_V5" || msg.action === "START_AUTOMATION_V6" || msg.action === "START_AUTOMATION_V7" || msg.action === "START_AUTOMATION_V8" || msg.action === "START_AUTOMATION_V9") {
     if (isAutomationRunning) {
       console.log("⚠️ Automation already running, ignoring duplicate start");
       return;
     }
     shouldStopAutomation = false;
     runAutomation();
-  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3" || msg.action === "COLLECT_SELLER_NAMES_V4" || msg.action === "COLLECT_SELLER_NAMES_V5" || msg.action === "COLLECT_SELLER_NAMES_V6" || msg.action === "COLLECT_SELLER_NAMES_V7" || msg.action === "COLLECT_SELLER_NAMES_V8") {
+  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3" || msg.action === "COLLECT_SELLER_NAMES_V4" || msg.action === "COLLECT_SELLER_NAMES_V5" || msg.action === "COLLECT_SELLER_NAMES_V6" || msg.action === "COLLECT_SELLER_NAMES_V7" || msg.action === "COLLECT_SELLER_NAMES_V8" || msg.action === "COLLECT_SELLER_NAMES_V9") {
     startSellerDiscovery();
-  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3" || msg.action === "STOP_AUTOMATION_V4" || msg.action === "STOP_AUTOMATION_V5" || msg.action === "STOP_AUTOMATION_V6" || msg.action === "STOP_AUTOMATION_V7" || msg.action === "STOP_AUTOMATION_V8") {
+  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3" || msg.action === "STOP_AUTOMATION_V4" || msg.action === "STOP_AUTOMATION_V5" || msg.action === "STOP_AUTOMATION_V6" || msg.action === "STOP_AUTOMATION_V7" || msg.action === "STOP_AUTOMATION_V8" || msg.action === "STOP_AUTOMATION_V9") {
     shouldStopAutomation = true;
     console.log("🛑 STOP requested by user");
   }
+
+  return false;
 });
 
 // --------------------
@@ -943,85 +973,108 @@ function parseContactText(text) {
 // --------------------
 // New tab helpers
 // --------------------
-function findInNewTab(newTab, text, tagFilter = "a,button,span,div") {
-  try {
-    const candidates = newTab.document.querySelectorAll(tagFilter);
-    const target = text.trim().toLowerCase();
-    for (const el of candidates) {
-      if (el.textContent && el.textContent.trim().toLowerCase().includes(target)) {
-        return el;
+function requestProductSellerData(productUrl, sellerId, sellerIndex, timeout = 250000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        success: false,
+        phase: "content-request-timeout",
+        error: `Background product workflow did not respond within ${timeout} ms`
+      });
+    }, timeout);
+
+    chrome.runtime.sendMessage({
+      action: "PROCESS_TARGET_PRODUCT_V9",
+      productUrl,
+      sellerId,
+      sellerIndex
+    }, (response) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        resolve({
+          success: false,
+          phase: "background-message",
+          error: runtimeError.message
+        });
+        return;
       }
+
+      resolve(response || {
+        success: false,
+        phase: "background-response",
+        error: "Background product workflow returned no response"
+      });
+    });
+  });
+}
+
+function findInCurrentPage(text, tagFilter = "a,button,span,div") {
+  const candidates = document.querySelectorAll(tagFilter);
+  const target = text.trim().toLowerCase();
+  for (const el of candidates) {
+    if (el.textContent && el.textContent.trim().toLowerCase().includes(target)) {
+      return el;
     }
-    return null;
-  } catch {
-    return null;
   }
+  return null;
 }
 
-function findContactTab(newTab) {
-  try {
-    return (
-      newTab.document.querySelector('[data-test="tabContact"]') ||
-      newTab.document.querySelector('#tab-Contact') ||
-      newTab.document.querySelector('button[aria-controls="tabContent-tab-Contact"]') ||
-      findInNewTab(newTab, "Contact", "button")
-    );
-  } catch {
-    return null;
-  }
+function findContactTab() {
+  return (
+    document.querySelector('[data-test="tabContact"]') ||
+    document.querySelector('#tab-Contact') ||
+    document.querySelector('button[aria-controls="tabContent-tab-Contact"]') ||
+    findInCurrentPage("Contact", "button")
+  );
 }
 
-async function waitForContactTab(newTab, timeout = 30000) {
+async function waitForContactTab(timeout = 30000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    const tab = findContactTab(newTab);
+    const tab = findContactTab();
     if (tab) return tab;
     await sleep(500);
   }
   return null;
 }
 
-async function waitForNewTabDocument(newTab, timeout = 5000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    try {
-      if (newTab.document) return true;
-    } catch {
-      // Cross-origin or not ready
-    }
-    await sleep(250);
-  }
-  return false;
-}
-
-async function findSoldByLinkWithRetries(newTab, attempts = 5, delayMs = 2000) {
+async function findSoldByLinkWithRetries(attempts = 5, delayMs = 2000, requestId = "unknown-request") {
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    console.log(`🔍 [${attempt}/${attempts}] Looking for "Sold & shipped by"...`);
+    console.log(`[Product ${requestId}] [${attempt}/${attempts}] Looking for "Sold & shipped by"...`);
 
     let soldByLink =
-      findInNewTab(newTab, "Sold & shipped by", "a") ||
-      findInNewTab(newTab, "Sold & shipped by", "button") ||
-      findInNewTab(newTab, "Sold & shipped by") ||
-      findInNewTab(newTab, "Sold and shipped by"); // Sold & shipped by  // Sold & shipped by
+      findInCurrentPage("Sold & shipped by", "a") ||
+      findInCurrentPage("Sold & shipped by", "button") ||
+      findInCurrentPage("Sold & shipped by") ||
+      findInCurrentPage("Sold and shipped by");
 
     if (soldByLink) return soldByLink;
 
-    console.warn("⚠️ 'Sold & shipped by' not found yet, waiting...");
-    await sleep(delayMs);
+    if (attempt < attempts) {
+      console.warn(`[Product ${requestId}] 'Sold & shipped by' not found yet, waiting...`);
+      await sleep(delayMs);
+    }
   }
 
   return null;
 }
 
-async function getContactDataWithRetries(newTab, attempts = 3, delayMs = 8000) {
+async function getContactDataWithRetries(attempts = 3, delayMs = 8000, requestId = "unknown-request") {
   let lastContactText = null;
   let lastParsed = null;
   let lastReason = "Contact tab not found";
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    console.log(`🔍 [${attempt}/${attempts}] Checking contact tab/content...`);
+    console.log(`[Product ${requestId}] [${attempt}/${attempts}] Checking contact tab/content...`);
 
-    const contactTab = await waitForContactTab(newTab, 5000);
+    const contactTab = await waitForContactTab(5000);
     if (contactTab) {
       try {
         contactTab.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1034,15 +1087,7 @@ async function getContactDataWithRetries(newTab, attempts = 3, delayMs = 8000) {
       }
       await sleep(2000);
 
-      let contactContentEl = null;
-      try {
-        contactContentEl = newTab.document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
-      } catch (error) {
-        lastReason = error && error.message ? error.message : "Contact extraction error";
-        console.warn("Contact extraction attempt failed:", error);
-        if (attempt < attempts) await sleep(delayMs);
-        continue;
-      }
+      const contactContentEl = document.querySelector('[data-test="tab-tabContent-tab-Contact"]');
       if (contactContentEl && contactContentEl.textContent && contactContentEl.textContent.trim().length > 0) {
         lastContactText = contactContentEl.textContent;
         lastParsed = parseContactText(lastContactText);
@@ -1086,12 +1131,12 @@ async function getContactDataWithRetries(newTab, attempts = 3, delayMs = 8000) {
   };
 }
 
-async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
-  console.log(`🔗 New tab URL: ${newTab.location.href}`);
-  console.log("🔗 Searching for 'Sold & shipped by' link in new tab...");
+async function discoverSellerFromCurrentProduct(sellerId, sellerIndex, requestId = "unknown-request") {
+  console.log(`[Product ${requestId}] Product page URL: ${window.location.href}`);
+  console.log(`[Product ${requestId}] Searching for 'Sold & shipped by' link...`);
 
   await sleep(500);
-  const soldByLink = await findSoldByLinkWithRetries(newTab, 5, 2000);
+  const soldByLink = await findSoldByLinkWithRetries(5, 2000, requestId);
 
   if (!soldByLink) {
     console.warn("⚠️ 'Sold & shipped by' not found in new tab");
@@ -1108,17 +1153,33 @@ async function extractSellerDataFromNewTab(newTab, sellerId, sellerIndex) {
     };
   }
 
-  console.log("✅ Found 'Sold & shipped by' link in new tab");
-  console.log("🖱️  Clicking in new tab...");
+  console.log(`[Product ${requestId}] Found 'Sold & shipped by' link`, {
+    tagName: soldByLink.tagName,
+    href: soldByLink.href || "",
+    text: (soldByLink.textContent || "").trim().slice(0, 200)
+  });
+
+  const sellerAnchor = soldByLink.closest("a[href]");
+  if (sellerAnchor && sellerAnchor.href) {
+    console.log(`[Product ${requestId}] Seller destination discovered: ${sellerAnchor.href}`);
+    return { sellerUrl: sellerAnchor.href };
+  }
+
+  // Target currently exposes an anchor, but retain support for a button/modal UI.
+  console.log(`[Product ${requestId}] Seller element has no URL; using in-page click fallback...`);
 
   soldByLink.scrollIntoView({ behavior: "smooth", block: "center" });
   soldByLink.click();
   await sleep(1500);
 
-  const sellerPageUrl = newTab.location.href;
-  console.log(`🔗 Seller page URL: ${sellerPageUrl}`);
+  return extractSellerContactFromCurrentPage(sellerId, sellerIndex, requestId);
+}
 
-  const contactData = await getContactDataWithRetries(newTab, 3, 8000);
+async function extractSellerContactFromCurrentPage(sellerId, sellerIndex, requestId = "unknown-request") {
+  const sellerPageUrl = window.location.href;
+  console.log(`[Product ${requestId}] Extracting contact data from: ${sellerPageUrl}`);
+
+  const contactData = await getContactDataWithRetries(3, 8000, requestId);
   if (contactData && contactData.success) {
     const parsed = contactData.parsed;
 
@@ -1333,52 +1394,33 @@ async function collectSellerEmails() {
         continue;
       }
 
-      // Get product URL and open in new tab
+      // Ask the service worker to create the product tab. The product tab's own
+      // content script performs DOM extraction, avoiding cross-tab Window access.
       const productUrl = firstProductLink.href;
       console.log(`🔗 Opening product in new tab: ${productUrl}`);
 
-      let finalSellerData = null;
+      console.log("⏳ Background is creating and monitoring the product tab...");
+      const productResult = await requestProductSellerData(productUrl, sellerId, i + 1);
+      let finalSellerData;
 
-      const newTab = window.open(productUrl, "_blank");
-      if (!newTab) {
-        console.error("❌ Failed to open new tab (popup blocked?)");
+      if (productResult && productResult.success && productResult.sellerData) {
+        finalSellerData = productResult.sellerData;
+        console.log(`✅ Product workflow completed (${productResult.requestId || "no request ID"})`);
+      } else {
+        const failurePhase = productResult && productResult.phase
+          ? productResult.phase
+          : "unknown-phase";
+        const failureReason = productResult && productResult.error
+          ? productResult.error
+          : "Unknown product workflow error";
+        console.error(`❌ Product workflow failed during ${failurePhase}: ${failureReason}`);
         finalSellerData = {
           id: i + 1,
           unique_id: sellerId,
-          email: "Not found - Popup blocked",
-          store_link: "Not found"
+          email: `Not found - Product ${failurePhase}`,
+          store_link: "Not found",
+          error_reason: failureReason
         };
-      } else {
-        console.log("⏳ Waiting for new tab to initialize...");
-        await sleep(1500);
-
-        const tabReady = await waitForNewTabDocument(newTab, 5000);
-        if (!tabReady) {
-          console.error("❌ New tab did not initialize in time");
-          try { newTab.close(); } catch(e) {}
-          finalSellerData = {
-            id: i + 1,
-            unique_id: sellerId,
-            email: "Not found - Tab load timeout",
-            store_link: "Not found"
-          };
-        } else {
-          try {
-            const result = await extractSellerDataFromNewTab(newTab, sellerId, i + 1);
-            finalSellerData = result.sellerData;
-            try { newTab.close(); } catch(e) {}
-            await sleep(300);
-          } catch (error) {
-            console.error("❌ Error working with new tab:", error);
-            try { newTab.close(); } catch(e) {}
-            finalSellerData = {
-              id: i + 1,
-              unique_id: sellerId,
-              email: "Not found - Tab error",
-              store_link: "Not found"
-            };
-          }
-        }
       }
 
       if (finalSellerData) {
