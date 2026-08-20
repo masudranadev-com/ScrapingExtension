@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Target Mail Hunter — Live Logs</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: rgba(20, 25, 38, 0.9);
+      --panel-strong: #171d2b;
+      --border: rgba(255, 255, 255, 0.09);
+      --text: #f5f7fb;
+      --muted: #98a2b6;
+      --accent: #ff4d55;
+      --accent-soft: rgba(255, 77, 85, 0.14);
+      --info: #55a8ff;
+      --warning: #ffbe3d;
+      --error: #ff5e72;
+      --success: #4ed7a6;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(255, 77, 85, 0.16), transparent 30%),
+        radial-gradient(circle at 90% 20%, rgba(70, 108, 255, 0.13), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .shell { width: min(1500px, calc(100% - 40px)); margin: 0 auto; padding: 32px 0 48px; }
+
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1 { margin: 0; font-size: clamp(28px, 4vw, 46px); letter-spacing: -0.04em; }
+    .subtitle { margin: 9px 0 0; color: var(--muted); font-size: 14px; }
+
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 10px 14px;
+      border: 1px solid rgba(78, 215, 166, 0.28);
+      border-radius: 999px;
+      background: rgba(78, 215, 166, 0.08);
+      color: #bff8e4;
+      font-size: 13px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 5px rgba(78, 215, 166, 0.12); }
+    .live-pill.paused { color: #d2d6df; border-color: var(--border); background: rgba(255,255,255,.04); }
+    .live-pill.paused .live-dot { background: #8992a3; box-shadow: none; }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .stat {
+      padding: 18px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.022));
+      box-shadow: 0 16px 40px rgba(0,0,0,.16);
+    }
+    .stat-label { color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .stat-value { display: block; margin-top: 7px; font-size: 30px; font-weight: 800; letter-spacing: -.04em; }
+    .stat.info .stat-value { color: var(--info); }
+    .stat.warning .stat-value { color: var(--warning); }
+    .stat.error .stat-value { color: var(--error); }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) 170px 180px auto auto auto;
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 18px 18px 0 0;
+      background: var(--panel);
+      backdrop-filter: blur(14px);
+    }
+
+    input, select, button {
+      height: 42px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: #111624;
+      color: var(--text);
+      font: inherit;
+    }
+    input, select { width: 100%; padding: 0 13px; outline: none; }
+    input:focus, select:focus { border-color: rgba(85,168,255,.75); box-shadow: 0 0 0 3px rgba(85,168,255,.12); }
+    button { padding: 0 15px; cursor: pointer; font-weight: 750; transition: .15s ease; white-space: nowrap; }
+    button:hover { transform: translateY(-1px); border-color: rgba(255,255,255,.22); background: #181f30; }
+    button.danger { color: #ffbec7; background: rgba(255,94,114,.08); border-color: rgba(255,94,114,.24); }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-top: 0;
+      border-radius: 0 0 18px 18px;
+      background: rgba(11, 15, 24, .82);
+      box-shadow: 0 24px 60px rgba(0,0,0,.24);
+    }
+
+    table { width: 100%; min-width: 1040px; border-collapse: collapse; table-layout: fixed; }
+    th { position: sticky; top: 0; z-index: 2; padding: 13px 14px; background: #161c29; color: #b7c0d1; text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    td { padding: 14px; border-top: 1px solid rgba(255,255,255,.06); vertical-align: top; font-size: 13px; }
+    tbody tr:hover { background: rgba(255,255,255,.025); }
+    .col-time { width: 205px; }
+    .col-level { width: 100px; }
+    .col-source { width: 125px; }
+    .col-details { width: 120px; }
+    .time { color: #c8d0df; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; white-space: nowrap; }
+    .source { color: #aeb8ca; font-family: "SFMono-Regular", Consolas, monospace; }
+    .message { color: #edf1f8; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+    .badge { display: inline-flex; min-width: 66px; justify-content: center; padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 850; letter-spacing: .07em; text-transform: uppercase; }
+    .badge.log { color: #b9dcff; background: rgba(85,168,255,.12); }
+    .badge.warn { color: #ffe0a0; background: rgba(255,190,61,.13); }
+    .badge.error { color: #ffc0c8; background: rgba(255,94,114,.14); }
+
+    .inspect-button { height: 34px; padding: 0 12px; color: #a8d2ff; background: rgba(85,168,255,.08); border-color: rgba(85,168,255,.22); font-size: 12px; }
+
+    body.modal-open { overflow: hidden; }
+    .modal[hidden] { display: none; }
+    .modal {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: rgba(2, 5, 10, .78);
+      backdrop-filter: blur(10px);
+      opacity: 0;
+      transition: opacity .16s ease;
+    }
+    .modal.open { opacity: 1; }
+    .modal-card {
+      width: min(980px, 100%);
+      max-height: min(860px, calc(100vh - 48px));
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 22px;
+      background: linear-gradient(160deg, #1a2130, #0d121d 62%);
+      box-shadow: 0 36px 100px rgba(0,0,0,.62);
+      transform: translateY(12px) scale(.985);
+      transition: transform .18s ease;
+    }
+    .modal.open .modal-card { transform: translateY(0) scale(1); }
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      margin: 0;
+      padding: 20px 22px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,.025);
+    }
+    .modal-heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .modal-heading h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+    .modal-heading p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+    .modal-close { width: 38px; min-width: 38px; padding: 0; color: #d4dae5; font-size: 22px; }
+    .modal-body { overflow: auto; padding: 22px; }
+    .metadata-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .metadata-item { min-width: 0; padding: 13px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.025); }
+    .metadata-item.wide { grid-column: 1 / -1; }
+    .metadata-label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .metadata-value { display: block; color: #edf2fa; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; overflow-wrap: anywhere; }
+    .inspect-section { margin-top: 14px; }
+    .inspect-section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+    .inspect-section h3 { margin: 0; color: #cbd4e3; font-size: 11px; letter-spacing: .09em; text-transform: uppercase; }
+    .inspect-message, .inspect-json { margin: 0; padding: 15px; border: 1px solid var(--border); border-radius: 12px; background: #080c14; color: #e4eaf4; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .inspect-message { font: 13px/1.65 system-ui, sans-serif; }
+    .inspect-json { max-height: 390px; overflow: auto; font: 12px/1.6 "SFMono-Regular", Consolas, monospace; }
+    .copy-button { height: 32px; padding: 0 11px; color: #b9dcff; font-size: 11px; }
+
+    .empty { display: none; padding: 70px 20px; text-align: center; color: var(--muted); }
+    .empty.visible { display: block; }
+    .footer-note { display: flex; justify-content: space-between; gap: 15px; margin-top: 12px; color: #778196; font-size: 12px; }
+
+    @media (max-width: 1000px) {
+      .toolbar { grid-template-columns: 1fr 1fr 1fr; }
+      .toolbar input { grid-column: 1 / -1; }
+    }
+    @media (max-width: 700px) {
+      .shell { width: min(100% - 22px, 1500px); padding-top: 20px; }
+      header { flex-direction: column; }
+      .stats { grid-template-columns: 1fr 1fr; }
+      .toolbar { grid-template-columns: 1fr 1fr; }
+      .modal { padding: 10px; }
+      .modal-card { max-height: calc(100vh - 20px); }
+      .metadata-grid { grid-template-columns: 1fr; }
+      .metadata-item.wide { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">Target Mail Hunter</p>
+        <h1>Live automation logs</h1>
+        <p class="subtitle">Background, popup, and Target-page diagnostics in one timeline.</p>
+      </div>
+      <div class="live-pill" id="liveStatus"><span class="live-dot"></span><span id="liveText">Live · auto-refreshing</span></div>
+    </header>
+
+    <section class="stats" aria-label="Log summary">
+      <article class="stat"><span class="stat-label">Total entries</span><strong class="stat-value" id="totalCount">0</strong></article>
+      <article class="stat info"><span class="stat-label">Information</span><strong class="stat-value" id="infoCount">0</strong></article>
+      <article class="stat warning"><span class="stat-label">Warnings</span><strong class="stat-value" id="warningCount">0</strong></article>
+      <article class="stat error"><span class="stat-label">Errors</span><strong class="stat-value" id="errorCount">0</strong></article>
+    </section>
+
+    <section class="toolbar" aria-label="Log controls">
+      <input type="search" id="searchInput" placeholder="Search messages, source, URL, or details…" />
+      <select id="levelFilter" aria-label="Filter by level">
+        <option value="all">All levels</option>
+        <option value="log">Information</option>
+        <option value="warn">Warnings</option>
+        <option value="error">Errors</option>
+      </select>
+      <select id="sourceFilter" aria-label="Filter by source"><option value="all">All sources</option></select>
+      <button id="toggleRefresh" type="button">Pause live</button>
+      <button id="exportLogs" type="button">Export JSON</button>
+      <button id="clearLogs" class="danger" type="button">Clear logs</button>
+    </section>
+
+    <section class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-time">Exact date &amp; time</th>
+            <th class="col-level">Level</th>
+            <th class="col-source">Source</th>
+            <th>Message</th>
+            <th class="col-details">Details</th>
+          </tr>
+        </thead>
+        <tbody id="logRows"></tbody>
+      </table>
+      <div class="empty" id="emptyState">No logs match the current filters.</div>
+    </section>
+
+    <div class="footer-note">
+      <span id="resultSummary">Showing 0 entries</span>
+      <span id="lastUpdated">Waiting for logs…</span>
+    </div>
+  </main>
+
+  <div class="modal" id="logModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" hidden>
+    <article class="modal-card">
+      <header class="modal-header">
+        <div class="modal-heading">
+          <span class="badge log" id="modalLevel">Info</span>
+          <div>
+            <h2 id="modalTitle">Log inspection</h2>
+            <p id="modalSubtitle">Complete stored event details</p>
+          </div>
+        </div>
+        <button class="modal-close" id="modalClose" type="button" aria-label="Close log inspection">×</button>
+      </header>
+      <div class="modal-body">
+        <section class="metadata-grid">
+          <div class="metadata-item"><span class="metadata-label">Exact date &amp; time</span><span class="metadata-value" id="modalTime"></span></div>
+          <div class="metadata-item"><span class="metadata-label">Source</span><span class="metadata-value" id="modalSource"></span></div>
+          <div class="metadata-item"><span class="metadata-label">Tab ID</span><span class="metadata-value" id="modalTabId"></span></div>
+          <div class="metadata-item wide"><span class="metadata-label">Page URL</span><span class="metadata-value" id="modalPageUrl"></span></div>
+          <div class="metadata-item wide"><span class="metadata-label">Log ID</span><span class="metadata-value" id="modalLogId"></span></div>
+        </section>
+        <section class="inspect-section">
+          <div class="inspect-section-header"><h3>Message</h3></div>
+          <pre class="inspect-message" id="modalMessage"></pre>
+        </section>
+        <section class="inspect-section">
+          <div class="inspect-section-header">
+            <h3>Structured details</h3>
+            <button class="copy-button" id="copyLog" type="button">Copy complete log</button>
+          </div>
+          <pre class="inspect-json" id="modalDetails"></pre>
+        </section>
+      </div>
+    </article>
+  </div>
+  <script src="log.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 let isRunning = false;
 const startButton = document.getElementById("start");
 const viewDataButton = document.getElementById("viewData");
+const viewLogsButton = document.getElementById("viewLogs");
 const signalDockClientNamesUrl = "http://localhost:3000/target/client-names";
 let signalDockSyncPromise = null;
 
@@ -233,7 +234,7 @@ async function ensureLatestContentScript(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["content.js"]
+      files: ["logger.js", "content.js"]
     });
     return true;
   } catch (error) {
@@ -303,5 +304,11 @@ viewDataButton.addEventListener("click", async () => {
   await syncSignalDockClientNames();
   chrome.tabs.create({
     url: chrome.runtime.getURL('viewer.html')
+  });
+});
+
+viewLogsButton.addEventListener("click", () => {
+  chrome.tabs.create({
+    url: chrome.runtime.getURL("log.html")
   });
 });

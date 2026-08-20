@@ -1002,7 +1002,7 @@ async function findSoldByLinkWithRetries(newTab, attempts = 5, delayMs = 2000) {
       findInNewTab(newTab, "Sold & shipped by", "a") ||
       findInNewTab(newTab, "Sold & shipped by", "button") ||
       findInNewTab(newTab, "Sold & shipped by") ||
-      findInNewTab(newTab, "Sold and shipped by");
+      findInNewTab(newTab, "Sold and shipped by"); // Sold & shipped by  // Sold & shipped by
 
     if (soldByLink) return soldByLink;
 
