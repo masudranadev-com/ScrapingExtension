@@ -220,7 +220,7 @@ function syncSignalDockClientNames() {
         clientNameCheckError: errorMessage,
         clientNameCheckedAt: new Date().toISOString()
       });
-      console.error("[SignalDock] API request failed:", errorMessage, error);
+      console.warn("[SignalDock] API request unavailable; cached/offline mode will be used:", errorMessage, error);
       return { success: false, names: [], error: errorMessage };
     } finally {
       signalDockSyncPromise = null;
@@ -258,7 +258,7 @@ async function sendSellerDiscoveryMessage() {
   const loaded = await ensureLatestContentScript(tab.id);
   if (!loaded) return;
 
-  chrome.tabs.sendMessage(tab.id, { action: "COLLECT_SELLER_NAMES_V9" }, () => {
+  chrome.tabs.sendMessage(tab.id, { action: "COLLECT_SELLER_NAMES_V10" }, () => {
     void chrome.runtime.lastError;
   });
 }
@@ -279,13 +279,13 @@ startButton.addEventListener("click", async () => {
     const loaded = await ensureLatestContentScript(tab.id);
     if (!loaded) return;
 
-    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V9" }, () => {
+    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V10" }, () => {
       if (chrome.runtime.lastError) return;
       window.close();
     });
   } else {
     // Stop automation
-    chrome.tabs.sendMessage(tab.id, { action: "STOP_AUTOMATION_V9" }, () => {
+    chrome.tabs.sendMessage(tab.id, { action: "STOP_AUTOMATION_V10" }, () => {
       if (chrome.runtime.lastError) {
         console.warn("Content script not available:", chrome.runtime.lastError.message);
       }

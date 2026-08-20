@@ -6,6 +6,8 @@ const MAX_EXTENSION_LOG_ENTRIES = 3000;
 const MAX_EXTENSION_LOG_BYTES = 7 * 1024 * 1024;
 const PRODUCT_TAB_LOAD_TIMEOUT_MS = 45000;
 const PRODUCT_EXTRACTION_TIMEOUT_MS = 75000;
+const AUTOMATION_WATCHDOG_ALARM = "target-mail-hunter-watchdog";
+const AUTOMATION_WATCHDOG_STALE_MS = 3 * 60 * 1000;
 let extensionLogWriteQueue = Promise.resolve();
 
 function retainLogsWithinLimits(logs) {
@@ -54,6 +56,67 @@ function appendExtensionLog(entry) {
 
 globalThis.TMHLogStore = { append: appendExtensionLog };
 
+function ensureAutomationWatchdogAlarm() {
+  chrome.alarms.create(AUTOMATION_WATCHDOG_ALARM, { periodInMinutes: 1 });
+}
+
+async function restartAutomationTab(tabId, reason) {
+  if (!Number.isInteger(tabId)) return false;
+
+  const stored = await chrome.storage.local.get("automationWatchdog");
+  const current = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
+    ? stored.automationWatchdog
+    : {};
+  const restartCount = Number(current.restartCount || 0) + 1;
+
+  await chrome.storage.local.set({
+    automationWatchdog: {
+      ...current,
+      desiredRunning: true,
+      forceRestart: true,
+      lastHeartbeat: Date.now(),
+      lastStage: `restart-requested: ${reason}`,
+      restartCount
+    },
+    automationResumeState: null,
+    automationAttemptedSellerIds: []
+  });
+
+  console.warn(`[Watchdog] Reloading category tab ${tabId}: ${reason}`, { restartCount });
+  return new Promise((resolve) => {
+    chrome.tabs.reload(tabId, {}, () => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        console.error(`[Watchdog] Could not reload category tab ${tabId}:`, runtimeError.message);
+        resolve(false);
+        return;
+      }
+      resolve(true);
+    });
+  });
+}
+
+ensureAutomationWatchdogAlarm();
+
+chrome.runtime.onInstalled.addListener(ensureAutomationWatchdogAlarm);
+chrome.runtime.onStartup.addListener(ensureAutomationWatchdogAlarm);
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (!alarm || alarm.name !== AUTOMATION_WATCHDOG_ALARM) return;
+
+  const stored = await chrome.storage.local.get("automationWatchdog");
+  const watchdog = stored.automationWatchdog;
+  if (!watchdog || watchdog.desiredRunning !== true || !Number.isInteger(watchdog.tabId)) return;
+
+  const heartbeatAge = Date.now() - Number(watchdog.lastHeartbeat || 0);
+  if (Number.isFinite(heartbeatAge) && heartbeatAge <= AUTOMATION_WATCHDOG_STALE_MS) return;
+
+  await restartAutomationTab(
+    watchdog.tabId,
+    `no heartbeat for ${Math.max(0, Math.round(heartbeatAge / 1000))} seconds`
+  );
+});
+
 function errorMessage(error) {
   return error && error.message ? error.message : String(error || "Unknown error");
 }
@@ -66,7 +129,7 @@ function createProductTab(url, openerTabId, openerWindowId) {
   return new Promise((resolve, reject) => {
     chrome.tabs.create({
       url,
-      active: false,
+      active: true,
       ...(Number.isInteger(openerTabId) ? { openerTabId } : {}),
       ...(Number.isInteger(openerWindowId) ? { windowId: openerWindowId } : {})
     }, (tab) => {
@@ -221,16 +284,42 @@ async function sendTabMessageWithRetries(tabId, message, attempts = 10, delayMs 
   throw lastError || new Error("Product content script did not become ready");
 }
 
-function closeTab(tabId) {
-  return new Promise((resolve) => {
-    if (!Number.isInteger(tabId)) {
-      resolve();
+async function sendWorkflowResultToTab(tabId, clientRequestId, response, attempts = 10) {
+  if (!Number.isInteger(tabId) || !clientRequestId) return false;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const delivered = await new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, {
+        action: "PRODUCT_WORKFLOW_RESULT_V11",
+        clientRequestId,
+        response
+      }, (acknowledgement) => {
+        const runtimeError = chrome.runtime.lastError;
+        resolve(Boolean(
+          !runtimeError &&
+          acknowledgement &&
+          acknowledgement.received === true
+        ));
+      });
+    });
+
+    if (delivered) return true;
+    if (attempt < attempts) await delay(500);
+  }
+
+  return false;
+}
+
+function closeTab(tabId, requestId = "unknown-request") {
+  if (!Number.isInteger(tabId)) return;
+
+  chrome.tabs.remove(tabId, () => {
+    const runtimeError = chrome.runtime.lastError;
+    if (runtimeError) {
+      console.warn(`[Product ${requestId}] Product tab cleanup warning: ${runtimeError.message}`);
       return;
     }
-    chrome.tabs.remove(tabId, () => {
-      void chrome.runtime.lastError;
-      resolve();
-    });
+    console.log(`[Product ${requestId}] Product tab close confirmed`, { productTabId: tabId });
   });
 }
 
@@ -242,7 +331,8 @@ function activateTab(tabId) {
 }
 
 async function processTargetProduct(message, sender) {
-  const requestId = `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const requestId = message.clientRequestId ||
+    `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
   const openerWindowId = sender.tab && Number.isInteger(sender.tab.windowId)
     ? sender.tab.windowId
@@ -327,7 +417,9 @@ async function processTargetProduct(message, sender) {
   } finally {
     if (productTabId !== null) {
       console.log(`[Product ${requestId}] Phase: close-tab`, { productTabId });
-      await closeTab(productTabId);
+      // Cleanup must never delay the response to the category content script.
+      // chrome.tabs.remove() can finish independently after its request is queued.
+      closeTab(productTabId, requestId);
     }
     activateTab(openerTabId);
   }
@@ -343,8 +435,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === "AUTOMATION_WATCHDOG_UPDATE_V11") {
+    const tabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+    chrome.storage.local.get("automationWatchdog").then((stored) => {
+      const current = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
+        ? stored.automationWatchdog
+        : {};
+      return chrome.storage.local.set({
+        automationWatchdog: {
+          ...current,
+          tabId,
+          categoryPathname: String(message.categoryPathname || current.categoryPathname || ""),
+          desiredRunning: message.desiredRunning === true,
+          forceRestart: message.forceRestart === true,
+          lastHeartbeat: Date.now(),
+          lastStage: String(message.stage || "unknown")
+        }
+      });
+    })
+      .then(() => sendResponse({ success: true, tabId }))
+      .catch((error) => {
+        console.error("[Watchdog] Could not store heartbeat:", error);
+        sendResponse({ success: false, error: errorMessage(error) });
+      });
+    return true;
+  }
+
+  if (message.action === "REQUEST_AUTOMATION_RESTART_V11") {
+    const tabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+    restartAutomationTab(tabId, String(message.reason || "content script requested restart"))
+      .then((restarted) => sendResponse({ success: restarted }));
+    return true;
+  }
+
   if (message.action === "PROCESS_TARGET_PRODUCT_V9") {
-    processTargetProduct(message, sender).then(sendResponse);
+    const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
+    processTargetProduct(message, sender)
+      .then(async (response) => {
+        console.log(`[Product ${response.requestId || "unknown-request"}] Sending direct workflow result`);
+        const directResultDelivered = await sendWorkflowResultToTab(
+          openerTabId,
+          message.clientRequestId,
+          response
+        );
+        console.log(`[Product ${response.requestId || "unknown-request"}] Direct workflow result delivery`, {
+          delivered: directResultDelivered
+        });
+        console.log(`[Product ${response.requestId || "unknown-request"}] Sending workflow response`, {
+          success: response.success,
+          phase: response.phase || "complete"
+        });
+        sendResponse(response);
+      })
+      .catch((error) => {
+        console.error("Unexpected product workflow failure before response:", error);
+        sendResponse({
+          success: false,
+          phase: "background-unhandled-error",
+          error: errorMessage(error)
+        });
+      });
     return true;
   }
 
@@ -387,7 +537,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     })
     .catch((error) => {
-      console.error("[SignalDock] Background API request failed:", error);
+      console.warn("[SignalDock] Background API request unavailable; offline fallback may be used:", error);
       sendResponse({
         success: false,
         names: [],

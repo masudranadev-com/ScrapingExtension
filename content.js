@@ -1,10 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterVersion === "9.0.0") {
+if (window.__targetMailHunterVersion === "9.0.6") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
-window.__targetMailHunterVersion = "9.0.0";
+window.__targetMailHunterVersion = "9.0.6";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -13,6 +13,11 @@ window.__targetMailHunterLoaded = true;
 let shouldStopAutomation = false;
 let isAutomationRunning = false;
 let sellerDiscoveryPromise = null;
+let automationHeartbeatTimer = null;
+const pendingProductRequests = window.__targetMailHunterPendingProductRequests instanceof Map
+  ? window.__targetMailHunterPendingProductRequests
+  : new Map();
+window.__targetMailHunterPendingProductRequests = pendingProductRequests;
 
 // --------------------
 // Utility helpers
@@ -21,11 +26,73 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function updateAutomationWatchdog(desiredRunning, stage, forceRestart = false) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      action: "AUTOMATION_WATCHDOG_UPDATE_V11",
+      desiredRunning,
+      forceRestart,
+      stage,
+      categoryPathname: window.location.pathname
+    }, (response) => {
+      void chrome.runtime.lastError;
+      resolve(response || null);
+    });
+  });
+}
+
+function startAutomationHeartbeat(stage = "automation-running") {
+  if (automationHeartbeatTimer) clearInterval(automationHeartbeatTimer);
+  void updateAutomationWatchdog(true, stage, false);
+  automationHeartbeatTimer = null;
+}
+
+function reportAutomationProgress(stage) {
+  void updateAutomationWatchdog(true, stage, false);
+}
+
+function stopAutomationHeartbeat() {
+  if (!automationHeartbeatTimer) return;
+  clearInterval(automationHeartbeatTimer);
+  automationHeartbeatTimer = null;
+}
+
+async function finishAutomationRun(stage = "complete") {
+  stopAutomationHeartbeat();
+  await updateAutomationWatchdog(false, stage, false);
+}
+
+async function requestAutomationRestart(reason) {
+  stopAutomationHeartbeat();
+  console.error(`🔁 Requesting complete automation restart: ${reason}`);
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      action: "REQUEST_AUTOMATION_RESTART_V11",
+      reason
+    }, (response) => {
+      void chrome.runtime.lastError;
+      resolve(Boolean(response && response.success));
+    });
+  });
+}
+
+function scrollToAndClick(element) {
+  if (!element) return false;
+
+  element.scrollIntoView({ behavior: "auto", block: "center", inline: "nearest" });
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    // Some non-form elements do not support focus; clicking can still continue.
+  }
+  element.click();
+  return true;
+}
+
 function click(selector) {
   const el = document.querySelector(selector);
   if (el) {
-    el.click();
-    return true;
+    return scrollToAndClick(el);
   }
   console.warn("Element not found:", selector);
   return false;
@@ -35,6 +102,26 @@ function click(selector) {
 // Message listener
 // --------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === "PRODUCT_WORKFLOW_RESULT_V11") {
+    const pendingRequest = pendingProductRequests.get(msg.clientRequestId);
+    if (!pendingRequest) {
+      console.log("Product workflow result was already handled or belongs to an older run", {
+        clientRequestId: msg.clientRequestId || "missing"
+      });
+      sendResponse({ received: true, matched: false });
+      return false;
+    }
+
+    console.log("Product workflow result received directly from background", {
+      clientRequestId: msg.clientRequestId,
+      success: Boolean(msg.response && msg.response.success),
+      phase: msg.response && msg.response.phase ? msg.response.phase : "complete"
+    });
+    pendingRequest.resolve(msg.response);
+    sendResponse({ received: true, matched: true });
+    return false;
+  }
+
   if (msg.action === "DISCOVER_PRODUCT_SELLER_V9" || msg.action === "EXTRACT_SELLER_CONTACT_V9") {
     const requestId = msg.requestId || "unknown-request";
     const isDiscovery = msg.action === "DISCOVER_PRODUCT_SELLER_V9";
@@ -63,17 +150,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  if (msg.action === "START_AUTOMATION" || msg.action === "START_AUTOMATION_V2" || msg.action === "START_AUTOMATION_V3" || msg.action === "START_AUTOMATION_V4" || msg.action === "START_AUTOMATION_V5" || msg.action === "START_AUTOMATION_V6" || msg.action === "START_AUTOMATION_V7" || msg.action === "START_AUTOMATION_V8" || msg.action === "START_AUTOMATION_V9") {
+  if (msg.action === "START_AUTOMATION_V10") {
     if (isAutomationRunning) {
       console.log("⚠️ Automation already running, ignoring duplicate start");
       return;
     }
     shouldStopAutomation = false;
-    runAutomation();
-  } else if (msg.action === "COLLECT_SELLER_NAMES" || msg.action === "COLLECT_SELLER_NAMES_V2" || msg.action === "COLLECT_SELLER_NAMES_V3" || msg.action === "COLLECT_SELLER_NAMES_V4" || msg.action === "COLLECT_SELLER_NAMES_V5" || msg.action === "COLLECT_SELLER_NAMES_V6" || msg.action === "COLLECT_SELLER_NAMES_V7" || msg.action === "COLLECT_SELLER_NAMES_V8" || msg.action === "COLLECT_SELLER_NAMES_V9") {
+    isAutomationRunning = true;
+    updateAutomationWatchdog(true, "manual-start", false)
+      .then(() => setStorage({
+        automationAttemptedSellerIds: [],
+        automationResumeState: null
+      }))
+      .then(() => {
+        isAutomationRunning = false;
+        return runAutomation();
+      })
+      .catch((error) => {
+        isAutomationRunning = false;
+        console.error("Could not initialize the automation run:", error);
+      });
+  } else if (msg.action === "COLLECT_SELLER_NAMES_V10") {
     startSellerDiscovery();
-  } else if (msg.action === "STOP_AUTOMATION" || msg.action === "STOP_AUTOMATION_V2" || msg.action === "STOP_AUTOMATION_V3" || msg.action === "STOP_AUTOMATION_V4" || msg.action === "STOP_AUTOMATION_V5" || msg.action === "STOP_AUTOMATION_V6" || msg.action === "STOP_AUTOMATION_V7" || msg.action === "STOP_AUTOMATION_V8" || msg.action === "STOP_AUTOMATION_V9") {
+  } else if (msg.action === "STOP_AUTOMATION_V10") {
     shouldStopAutomation = true;
+    stopAutomationHeartbeat();
+    void updateAutomationWatchdog(false, "stopped-by-user", false);
     console.log("🛑 STOP requested by user");
   }
 
@@ -129,6 +231,7 @@ async function openFiltersAndSellerPanel(maxRetries = 5) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     if (shouldStopAutomation) return false;
 
+    reportAutomationProgress(`open-filters-attempt-${attempt}`);
     console.log(`🔄 [Attempt ${attempt}/${maxRetries}] Opening Filters + Seller panel...`);
 
     // Open Filters
@@ -153,7 +256,7 @@ async function openFiltersAndSellerPanel(maxRetries = 5) {
       console.warn(`⚠️ Seller panel didn't open (attempt ${attempt}/${maxRetries}), retrying...`);
       // Close modal and try again
       const closeBtn = document.querySelector('[data-test="modal-close-button"]') || document.querySelector('button[aria-label="close"]');
-      if (closeBtn) closeBtn.click();
+      if (closeBtn) scrollToAndClick(closeBtn);
       await sleep(2000);
       continue;
     }
@@ -176,8 +279,12 @@ async function recoverToProductListing(maxRetries = 3) {
     const onListing = await verifyProductListingPage(3000);
     if (onListing) return true;
 
-    // Try going back
-    window.history.back();
+    // The category tab is never intentionally navigated now. Close any modal,
+    // return to the product grid position, and allow Target time to re-render.
+    const closeButton = document.querySelector('[data-test="modal-close-button"]') ||
+      document.querySelector('button[aria-label="close"], button[aria-label="Close"]');
+    if (closeButton) scrollToAndClick(closeButton);
+    window.scrollTo({ top: 0, behavior: "auto" });
     await sleep(3000);
 
     const backWorked = await verifyProductListingPage(5000);
@@ -191,6 +298,7 @@ async function recoverToProductListing(maxRetries = 3) {
 
 async function runAutomation() {
   isAutomationRunning = true;
+  startAutomationHeartbeat("run-automation");
   console.log("🚀 Automation started");
 
   try {
@@ -211,21 +319,24 @@ async function runAutomation() {
       console.log("Retrying SignalDock validation from the cached seller catalog...");
       const refreshedStatus = await refreshCachedSignalDockStatuses(cachedCatalog);
       if (!refreshedStatus.clientNameCheckSucceeded) {
-        console.error("Stopping before opening filters: SignalDock validation failed");
-        return;
+        console.warn(
+          "SignalDock validation is unavailable; continuing in offline mode with cached seller statuses"
+        );
       }
     }
 
     // Open Filters + Seller panel with retries
     const opened = await openFiltersAndSellerPanel();
     if (!opened) {
-      console.error("❌ Could not open filters/seller panel after all retries. Stopping.");
+      console.error("❌ Could not open filters/seller panel after all retries.");
+      await requestAutomationRestart("filters/seller panel could not be opened");
       return;
     }
 
     // Collect emails
     await collectSellerEmails();
   } finally {
+    stopAutomationHeartbeat();
     isAutomationRunning = false;
   }
 }
@@ -330,7 +441,20 @@ async function getSignalDockClientNames() {
 
   if (cachedSuccess === true && Array.isArray(cachedNames)) {
     console.log(`[SignalDock] Using ${cachedNames.length} names fetched by the extension popup`);
-    return { success: true, names: cachedNames, error: "" };
+    return { success: true, names: cachedNames, error: "", usingStaleCache: false };
+  }
+
+  if (Array.isArray(cachedNames) && cachedNames.length > 0) {
+    console.warn(
+      `[SignalDock] Live validation is unavailable; using ${cachedNames.length} cached client names`,
+      cachedError || "Last refresh failed"
+    );
+    return {
+      success: true,
+      names: cachedNames,
+      error: "",
+      usingStaleCache: true
+    };
   }
 
   return new Promise((resolve) => {
@@ -340,14 +464,14 @@ async function getSignalDockClientNames() {
         const error = cachedError
           ? `Popup fetch failed: ${cachedError}; background fallback failed: ${backgroundError}`
           : `Background fallback failed: ${backgroundError}`;
-        console.error("[SignalDock]", error);
+        console.warn("[SignalDock]", error);
         resolve({ success: false, names: [], error });
         return;
       }
 
       if (!response || response.success !== true || !Array.isArray(response.names)) {
         const error = response && response.error ? response.error : "Invalid SignalDock response";
-        console.error("[SignalDock] Background fallback failed:", error);
+        console.warn("[SignalDock] Background fallback failed:", error);
         resolve({ success: false, names: [], error });
         return;
       }
@@ -484,7 +608,7 @@ async function discoverSellerNames() {
     console.log(`Using cached seller catalog (${cachedCatalog.totalSellers} sellers); modal scan skipped`);
     const refreshedStatus = await refreshCachedSignalDockStatuses(cachedCatalog);
     if (!refreshedStatus.clientNameCheckSucceeded) {
-      console.error("[SignalDock] Cached seller status refresh failed:", refreshedStatus.clientNameCheckError);
+      console.warn("[SignalDock] Cached seller status refresh failed:", refreshedStatus.clientNameCheckError);
     }
     return true;
   }
@@ -515,7 +639,7 @@ async function discoverSellerNames() {
       modal.querySelector('[data-test="modal-close-button"]') ||
       modal.querySelector('button[aria-label="close"], button[aria-label="Close"]')
     );
-    if (closeButton) closeButton.click();
+    if (closeButton) scrollToAndClick(closeButton);
   }
 }
 
@@ -585,7 +709,7 @@ function applySignalDockResult(sellerRows, clientCheck) {
       seller.is_new_seller = seller.is_new_seller === true;
     }
     newSellerCount = sellerRows.filter((seller) => seller.is_new_seller).length;
-    console.error(`SignalDock client-name check failed: ${clientCheck.error}`);
+    console.warn(`SignalDock client-name check unavailable: ${clientCheck.error}`);
   }
 
   return newSellerCount;
@@ -782,9 +906,15 @@ function waitForSelector(selector, timeout = 15000) {
 async function waitForFirstProductLink(timeout = 30000, pollInterval = 500) {
   console.log(`Waiting up to ${Math.round(timeout / 1000)} seconds for a product...`);
   const start = Date.now();
+  let lastProgressReport = 0;
 
   while (Date.now() - start < timeout) {
     if (shouldStopAutomation) return null;
+
+    if (Date.now() - lastProgressReport >= 10000) {
+      reportAutomationProgress("waiting-for-filtered-product");
+      lastProgressReport = Date.now();
+    }
 
     const productLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
     if (productLink && productLink.href) {
@@ -810,7 +940,7 @@ async function uncheckAllSellers() {
     const cbValue = (cb.value || "").toLowerCase();
     if (cbId === "include_out_of_stock" || cbId.includes("out_of_stock") || cbValue.includes("out of stock")) continue;
     console.log(`🔄 Unchecking: ${cbId}`);
-    cb.click();
+    scrollToAndClick(cb);
     uncheckedCount++;
     await sleep(300);
   }
@@ -936,11 +1066,7 @@ function clickElement(element, description = "element") {
   console.log(`   Element text: ${element.textContent?.substring(0, 50)}`);
   console.log(`   Element visible: ${element.offsetParent !== null}`);
 
-  // Scroll into view
-  element.scrollIntoView({ behavior: "smooth", block: "center" });
-
-  // Click the element
-  element.click();
+  scrollToAndClick(element);
   console.log(`✅ Clicked: ${description}`);
   return true;
 }
@@ -973,46 +1099,250 @@ function parseContactText(text) {
 // --------------------
 // New tab helpers
 // --------------------
-function requestProductSellerData(productUrl, sellerId, sellerIndex, timeout = 250000) {
+function requestProductSellerDataOnce(productUrl, sellerId, sellerIndex, timeout = 250000) {
   return new Promise((resolve) => {
     let settled = false;
-    const timeoutId = setTimeout(() => {
+    const clientRequestId = `category-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const finish = (response) => {
       if (settled) return;
       settled = true;
-      resolve({
+      clearTimeout(timeoutId);
+      pendingProductRequests.delete(clientRequestId);
+      resolve(response);
+    };
+
+    const timeoutId = setTimeout(() => {
+      finish({
         success: false,
         phase: "content-request-timeout",
         error: `Background product workflow did not respond within ${timeout} ms`
       });
     }, timeout);
 
+    pendingProductRequests.set(clientRequestId, { resolve: finish });
+
     chrome.runtime.sendMessage({
       action: "PROCESS_TARGET_PRODUCT_V9",
+      clientRequestId,
       productUrl,
       sellerId,
       sellerIndex
     }, (response) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-
+      // Read lastError even if the direct result already settled this request.
       const runtimeError = chrome.runtime.lastError;
+      if (settled) return;
+
       if (runtimeError) {
-        resolve({
-          success: false,
-          phase: "background-message",
-          error: runtimeError.message
-        });
+        // The direct PRODUCT_WORKFLOW_RESULT_V11 message remains available even
+        // if this long-lived response channel is closed by Chrome.
+        console.warn("Primary product response channel closed; waiting for direct result:", runtimeError.message);
         return;
       }
 
-      resolve(response || {
+      console.log("Product workflow response received from background", {
+        success: Boolean(response && response.success),
+        phase: response && response.phase ? response.phase : "complete",
+        requestId: response && response.requestId ? response.requestId : "unknown-request"
+      });
+      finish(response || {
         success: false,
         phase: "background-response",
         error: "Background product workflow returned no response"
       });
     });
   });
+}
+
+async function requestProductSellerData(productUrl, sellerId, sellerIndex, maxAttempts = 3) {
+  let lastResult = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    reportAutomationProgress(`product-workflow-attempt-${attempt}`);
+    console.log(`Product workflow attempt ${attempt}/${maxAttempts} for seller ${sellerId}`);
+    lastResult = await requestProductSellerDataOnce(productUrl, sellerId, sellerIndex);
+
+    if (lastResult && lastResult.success === true) return lastResult;
+    if (attempt < maxAttempts) {
+      const phase = lastResult && lastResult.phase ? lastResult.phase : "unknown-phase";
+      console.warn(`Product workflow attempt ${attempt} failed during ${phase}; retrying...`);
+      await sleep(3000);
+    }
+  }
+
+  return lastResult || {
+    success: false,
+    phase: "product-retries-exhausted",
+    error: `Product workflow failed after ${maxAttempts} attempts`
+  };
+}
+
+async function collectSellerFromProductUrl(productUrl, sellerId, sellerIndex) {
+  console.log(`🔗 Opening product in new tab: ${productUrl}`);
+  console.log("⏳ Background is creating and monitoring the product tab...");
+
+  const productResult = await requestProductSellerData(productUrl, sellerId, sellerIndex);
+  if (productResult && productResult.success && productResult.sellerData) {
+    console.log(`✅ Product workflow completed (${productResult.requestId || "no request ID"})`);
+    return productResult.sellerData;
+  }
+
+  const failurePhase = productResult && productResult.phase
+    ? productResult.phase
+    : "unknown-phase";
+  const failureReason = productResult && productResult.error
+    ? productResult.error
+    : "Unknown product workflow error";
+  console.error(`❌ Product workflow failed during ${failurePhase}: ${failureReason}`);
+  return {
+    id: sellerIndex,
+    unique_id: sellerId,
+    email: `Not found - Product ${failurePhase}`,
+    store_link: "Not found",
+    error_reason: failureReason
+  };
+}
+
+async function saveApplyResumeCheckpoint(sellerId, sellerIndex, sellerName) {
+  await setStorage({
+    automationResumeState: {
+      active: true,
+      stage: "after-seller-apply",
+      sellerId: String(sellerId || ""),
+      sellerIndex: Number(sellerIndex) || 0,
+      sellerName: String(sellerName || sellerId || "Unknown seller"),
+      categoryPathname: window.location.pathname,
+      createdAt: Date.now()
+    }
+  });
+  console.log(`💾 Navigation checkpoint saved for seller ${sellerName} (${sellerId})`);
+}
+
+async function clearApplyResumeCheckpoint(sellerId = "") {
+  const checkpoint = await getStorage("automationResumeState", null);
+  if (
+    checkpoint &&
+    checkpoint.active &&
+    sellerId &&
+    String(checkpoint.sellerId || "") !== String(sellerId)
+  ) {
+    return;
+  }
+  await setStorage({ automationResumeState: null });
+}
+
+async function markSellerAttemptedForCurrentRun(sellerId) {
+  const storedIds = await getStorage("automationAttemptedSellerIds", []);
+  const attemptedIds = new Set(
+    (Array.isArray(storedIds) ? storedIds : []).map((value) => String(value))
+  );
+  attemptedIds.add(String(sellerId));
+  await setStorage({ automationAttemptedSellerIds: [...attemptedIds] });
+}
+
+async function resumeAutomationFromCheckpoint() {
+  const checkpoint = await getStorage("automationResumeState", null);
+  if (!checkpoint || checkpoint.active !== true || checkpoint.stage !== "after-seller-apply") return;
+  if (String(checkpoint.categoryPathname || "") !== window.location.pathname) return;
+
+  const checkpointAge = Date.now() - Number(checkpoint.createdAt || 0);
+  if (!Number.isFinite(checkpointAge) || checkpointAge > 15 * 60 * 1000) {
+    console.warn("Discarding an expired automation navigation checkpoint");
+    await clearApplyResumeCheckpoint(checkpoint.sellerId);
+    return;
+  }
+  if (isAutomationRunning) return;
+
+  isAutomationRunning = true;
+  shouldStopAutomation = false;
+  startAutomationHeartbeat("resume-after-seller-apply");
+  let continueRemainingSellers = false;
+
+  try {
+    console.log(
+      `🔄 Resuming after Target navigation for ${checkpoint.sellerName} (${checkpoint.sellerId})`
+    );
+    await sleep(1500);
+
+    const firstProductLink = await waitForFirstProductLink(30000);
+    let finalSellerData;
+    if (!firstProductLink) {
+      console.warn(`No product appeared after navigation for ${checkpoint.sellerName}`);
+      finalSellerData = {
+        id: checkpoint.sellerIndex,
+        unique_id: checkpoint.sellerId,
+        email: "Not found - No products after navigation",
+        store_link: "Not found",
+        error_reason: "No product appeared within 30 seconds after applying seller filter"
+      };
+    } else {
+      finalSellerData = await collectSellerFromProductUrl(
+        firstProductLink.href,
+        checkpoint.sellerId,
+        checkpoint.sellerIndex
+      );
+    }
+
+    await saveSellerData(finalSellerData);
+    console.log(`✅ Resumed seller completed: ${checkpoint.sellerName}`);
+    continueRemainingSellers = true;
+  } catch (error) {
+    console.error("Resume after seller-filter navigation failed:", error);
+    await saveSellerData({
+      id: checkpoint.sellerIndex,
+      unique_id: checkpoint.sellerId,
+      email: "Not found - Resume error",
+      store_link: "Not found",
+      error_reason: error && error.message ? error.message : String(error)
+    });
+    continueRemainingSellers = true;
+  } finally {
+    await clearApplyResumeCheckpoint(checkpoint.sellerId);
+    stopAutomationHeartbeat();
+    isAutomationRunning = false;
+  }
+
+  if (continueRemainingSellers && !shouldStopAutomation) {
+    console.log("🔄 Restarting the seller queue after navigation resume...");
+    await sleep(1500);
+    await runAutomation();
+  }
+}
+
+async function bootstrapAutomationContinuation() {
+  const checkpoint = await getStorage("automationResumeState", null);
+  if (
+    checkpoint &&
+    checkpoint.active === true &&
+    checkpoint.stage === "after-seller-apply" &&
+    String(checkpoint.categoryPathname || "") === window.location.pathname
+  ) {
+    await resumeAutomationFromCheckpoint();
+    return;
+  }
+
+  const watchdog = await getStorage("automationWatchdog", null);
+  if (
+    !watchdog ||
+    watchdog.desiredRunning !== true ||
+    String(watchdog.categoryPathname || "") !== window.location.pathname ||
+    isAutomationRunning
+  ) {
+    return;
+  }
+
+  console.warn("🔁 Watchdog requested a full automation restart from the beginning", {
+    previousStage: watchdog.lastStage || "unknown",
+    restartCount: Number(watchdog.restartCount || 0)
+  });
+  if (watchdog.forceRestart === true) {
+    await setStorage({
+      automationAttemptedSellerIds: [],
+      automationResumeState: null
+    });
+  }
+  await updateAutomationWatchdog(true, "automatic-restart", false);
+  await runAutomation();
 }
 
 function findInCurrentPage(text, tagFilter = "a,button,span,div") {
@@ -1077,8 +1407,7 @@ async function getContactDataWithRetries(attempts = 3, delayMs = 8000, requestId
     const contactTab = await waitForContactTab(5000);
     if (contactTab) {
       try {
-        contactTab.scrollIntoView({ behavior: "smooth", block: "center" });
-        contactTab.click();
+        scrollToAndClick(contactTab);
       } catch (error) {
         lastReason = error && error.message ? error.message : "Contact tab click error";
         console.warn("Contact tab click attempt failed:", error);
@@ -1168,8 +1497,7 @@ async function discoverSellerFromCurrentProduct(sellerId, sellerIndex, requestId
   // Target currently exposes an anchor, but retain support for a button/modal UI.
   console.log(`[Product ${requestId}] Seller element has no URL; using in-page click fallback...`);
 
-  soldByLink.scrollIntoView({ behavior: "smooth", block: "center" });
-  soldByLink.click();
+  scrollToAndClick(soldByLink);
   await sleep(1500);
 
   return extractSellerContactFromCurrentPage(sellerId, sellerIndex, requestId);
@@ -1247,18 +1575,22 @@ async function collectSellerEmails() {
   }
 
   if (tempCheckboxes.length <= 1) {
-    console.warn("⚠️ Seller checkboxes not found, retrying with page reload...");
-    window.location.reload();
-    await sleep(5000);
+    console.warn("⚠️ Seller checkboxes not found; closing and reopening the panel...");
+    const closeButton = document.querySelector('[data-test="modal-close-button"]') ||
+      document.querySelector('button[aria-label="close"], button[aria-label="Close"]');
+    if (closeButton) scrollToAndClick(closeButton);
+    await sleep(1500);
     const retryOpen = await openFiltersAndSellerPanel();
     if (!retryOpen) {
-      console.error("❌ Seller checkboxes still not found after reload. Stopping.");
+      console.error("❌ Seller checkboxes still not found after bounded panel retries.");
+      await requestAutomationRestart("seller checkboxes did not load");
       return;
     }
-    // Re-check checkboxes
+    await sleep(1000);
     tempCheckboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
     if (tempCheckboxes.length <= 1) {
-      console.error("❌ No seller checkboxes found even after reload. Stopping.");
+      console.error("❌ No seller checkboxes found after reopening the panel.");
+      await requestAutomationRestart("seller checkbox panel remained empty");
       return;
     }
   }
@@ -1296,12 +1628,14 @@ async function collectSellerEmails() {
   }
 
   if (!initialization.clientNameCheckSucceeded) {
-    console.error("Stopping: SignalDock could not confirm which sellers are new");
-    return;
+    console.warn(
+      "SignalDock could not confirm new sellers; continuing with locally incomplete sellers only"
+    );
   }
 
   if (sellerCheckboxes.length === 0) {
-    console.warn("❌ No valid seller checkboxes found. Exiting.");
+    console.warn("❌ No valid seller checkboxes found.");
+    await requestAutomationRestart("no valid seller checkboxes were available");
     return;
   }
 
@@ -1311,10 +1645,18 @@ async function collectSellerEmails() {
       .filter((seller) => seller && seller.unique_id)
       .map((seller) => [String(seller.unique_id), seller])
   );
+  const storedAttemptedSellerIds = await getStorage("automationAttemptedSellerIds", []);
+  const attemptedSellerIds = new Set(
+    (Array.isArray(storedAttemptedSellerIds) ? storedAttemptedSellerIds : [])
+      .map((sellerId) => String(sellerId))
+  );
   const pendingSellerIds = new Set(
     sellerCheckboxes
       .map((input) => (input.getAttribute("data-test") || "").replace("facet-checkbox-", ""))
-      .filter((sellerId) => !hasFoundSellerStatus(sellerById.get(sellerId)))
+      .filter((sellerId) => (
+        !attemptedSellerIds.has(sellerId) &&
+        !hasFoundSellerStatus(sellerById.get(sellerId))
+      ))
   );
   const pendingSellerCount = pendingSellerIds.size;
   let attemptedPendingCount = 0;
@@ -1322,7 +1664,18 @@ async function collectSellerEmails() {
   console.log(`Not Found sellers queued: ${pendingSellerCount}`);
 
   if (pendingSellerCount === 0) {
-    console.log("All sellers already have a found email. Nothing to process.");
+    const incompleteSellerCount = sellerCheckboxes
+      .map((input) => (input.getAttribute("data-test") || "").replace("facet-checkbox-", ""))
+      .filter((sellerId) => !hasFoundSellerStatus(sellerById.get(sellerId)))
+      .length;
+    if (incompleteSellerCount > 0) {
+      console.log(
+        `All ${incompleteSellerCount} locally incomplete seller(s) were already attempted during this run.`
+      );
+    } else {
+      console.log("All sellers already have a found email. Nothing to process.");
+    }
+    await finishAutomationRun("all-sellers-attempted");
     return;
   }
 
@@ -1347,6 +1700,8 @@ async function collectSellerEmails() {
 
     attemptedPendingCount++;
     const sellerName = getSellerBusinessName(input, sellerId);
+    await markSellerAttemptedForCurrentRun(sellerId);
+    reportAutomationProgress(`processing-seller-${attemptedPendingCount}-of-${pendingSellerCount}`);
 
     try {
       console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
@@ -1365,15 +1720,20 @@ async function collectSellerEmails() {
       }
 
       console.log("🖱️  Clicking: Seller checkbox");
-      currentCheckbox.click();
+      scrollToAndClick(currentCheckbox);
       await sleep(600);
 
       console.log("🖱️  Clicking: Apply button (1st click)");
       click('[data-test="@web/FacetModalButtons/ApplyButton"]');
+      reportAutomationProgress("first-filter-apply-clicked");
       await sleep(1200);
 
+      // Target may perform a full category-page navigation on the final Apply.
+      // Persist enough state for the newly loaded content script to continue.
+      await saveApplyResumeCheckpoint(sellerId, i + 1, sellerName);
       console.log("🖱️  Clicking: Apply button (2nd click)");
       click('[data-test="@web/FacetModalButtons/ApplyButton"]');
+      reportAutomationProgress("second-filter-apply-clicked");
       await sleep(2000);
 
       // Product results can load slowly after applying a seller. Wait for up to
@@ -1388,44 +1748,20 @@ async function collectSellerEmails() {
           store_link: "Not found",
           error_reason: "No product appeared after waiting 30 seconds"
         });
+        await clearApplyResumeCheckpoint(sellerId);
 
         // Re-open filters for next seller
         await openFiltersAndSellerPanel();
         continue;
       }
 
-      // Ask the service worker to create the product tab. The product tab's own
-      // content script performs DOM extraction, avoiding cross-tab Window access.
       const productUrl = firstProductLink.href;
-      console.log(`🔗 Opening product in new tab: ${productUrl}`);
-
-      console.log("⏳ Background is creating and monitoring the product tab...");
-      const productResult = await requestProductSellerData(productUrl, sellerId, i + 1);
-      let finalSellerData;
-
-      if (productResult && productResult.success && productResult.sellerData) {
-        finalSellerData = productResult.sellerData;
-        console.log(`✅ Product workflow completed (${productResult.requestId || "no request ID"})`);
-      } else {
-        const failurePhase = productResult && productResult.phase
-          ? productResult.phase
-          : "unknown-phase";
-        const failureReason = productResult && productResult.error
-          ? productResult.error
-          : "Unknown product workflow error";
-        console.error(`❌ Product workflow failed during ${failurePhase}: ${failureReason}`);
-        finalSellerData = {
-          id: i + 1,
-          unique_id: sellerId,
-          email: `Not found - Product ${failurePhase}`,
-          store_link: "Not found",
-          error_reason: failureReason
-        };
-      }
+      const finalSellerData = await collectSellerFromProductUrl(productUrl, sellerId, i + 1);
 
       if (finalSellerData) {
         await saveSellerData(finalSellerData);
       }
+      await clearApplyResumeCheckpoint(sellerId);
 
       console.log(`✅ [${attemptedPendingCount}/${pendingSellerCount}] ${sellerName} completed`);
       console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -1450,24 +1786,18 @@ async function collectSellerEmails() {
         console.warn("⚠️ Lost product listing page, attempting recovery...");
         stillOnListing = await recoverToProductListing();
         if (!stillOnListing) {
-          console.error("❌ Could not recover product listing, but continuing to next seller...");
-          await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Page recovery failed" });
-          // Try reloading the page and reopening filters
-          window.location.reload();
-          await sleep(5000);
+          console.error("❌ Product grid did not reappear after bounded recovery; trying the filter panel directly...");
         }
       }
 
       // Re-open filters + seller panel with retries
       const panelReady = await openFiltersAndSellerPanel();
       if (!panelReady) {
-        console.warn("⚠️ Could not reopen filters panel, trying page reload...");
-        window.location.reload();
-        await sleep(5000);
-        // After reload, try once more
+        console.warn("⚠️ Could not reopen filters panel; waiting and retrying one final bounded cycle...");
+        await sleep(3000);
         const retryPanel = await openFiltersAndSellerPanel();
         if (!retryPanel) {
-          console.error("❌ Still can't open filters after reload, skipping to next seller...");
+          console.error("❌ Still can't open filters after retries; skipping to the next seller...");
           continue;
         }
       }
@@ -1476,6 +1806,8 @@ async function collectSellerEmails() {
       // NEVER let any error stop the loop
       console.error(`❌ Unexpected error processing seller ${i + 1} (${sellerId}):`, loopError);
       console.log("⚠️ Saving error and continuing to next seller...");
+
+      await clearApplyResumeCheckpoint(sellerId);
 
       try {
         await saveSellerData({
@@ -1495,8 +1827,7 @@ async function collectSellerEmails() {
         if (recovered) {
           await openFiltersAndSellerPanel();
         } else {
-          window.location.reload();
-          await sleep(5000);
+          console.warn("⚠️ Listing recovery timed out; attempting the filter panel without reloading...");
           await openFiltersAndSellerPanel();
         }
       } catch (recoveryError) {
@@ -1519,7 +1850,19 @@ async function collectSellerEmails() {
   console.log("");
   console.log("💾 Data saved in chrome.storage.local (key: 'sellerData')");
   console.log("✅ Script execution finished.");
+  await finishAutomationRun("all-sellers-complete");
 
 }
+
+// A Target filter Apply can replace the category document. Resume from the
+// persisted checkpoint without requiring another popup click.
+setTimeout(() => {
+  bootstrapAutomationContinuation().catch((error) => {
+    console.error("Automatic automation restart failed:", error);
+    void requestAutomationRestart(
+      error && error.message ? error.message : "automatic restart bootstrap failed"
+    );
+  });
+}, 750);
 
 } // end of duplicate injection guard
