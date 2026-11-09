@@ -7,7 +7,7 @@
   "permissions": ["activeTab", "alarms", "scripting", "storage"],
   "host_permissions": [
     "https://www.target.com/*",
-    "http://192.168.0.250:43127//*",
+    "http://192.168.0.250:43127/*",
     "http://localhost:3000/*",
     "http://127.0.0.1:3000/*"
   ],

@@ -162,14 +162,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         automationAttemptedSellerIds: [],
         automationResumeState: null
       }))
-      .then(() => {
+      .then(() => getSignalDockClientNames(true))
+      .then(async (clientCheck) => {
+        if (!clientCheck.success) {
+          await finishAutomationRun("client-list-sync-failed");
+          isAutomationRunning = false;
+          sendResponse({ success: false, error: clientCheck.error });
+          return;
+        }
+        sendResponse({ success: true });
         isAutomationRunning = false;
-        return runAutomation();
+        void runAutomation(clientCheck).catch((error) => {
+          console.error("Automation run failed:", error);
+        });
       })
       .catch((error) => {
         isAutomationRunning = false;
+        void finishAutomationRun("start-initialization-failed");
         console.error("Could not initialize the automation run:", error);
+        sendResponse({ success: false, error: error && error.message ? error.message : String(error) });
       });
+    return true;
   } else if (msg.action === "COLLECT_SELLER_NAMES_V10") {
     startSellerDiscovery();
   } else if (msg.action === "STOP_AUTOMATION_V10") {
@@ -296,7 +309,7 @@ async function recoverToProductListing(maxRetries = 3) {
   return false;
 }
 
-async function runAutomation() {
+async function runAutomation(syncedClientCheck = null) {
   isAutomationRunning = true;
   startAutomationHeartbeat("run-automation");
   console.log("🚀 Automation started");
@@ -307,6 +320,14 @@ async function runAutomation() {
       await sellerDiscoveryPromise;
     }
 
+    // Every process start/restart must validate against the shared database.
+    const liveClientCheck = syncedClientCheck || await getSignalDockClientNames(true);
+    if (!liveClientCheck.success) {
+      console.error(`[SignalDock] Cannot start automation without a live client-list sync: ${liveClientCheck.error}`);
+      await finishAutomationRun("client-list-sync-failed");
+      return;
+    }
+
     // Extract and cache category info
     const categoryName = extractCategoryName();
     const breadcrumbSteps = extractBreadcrumbSteps();
@@ -315,14 +336,8 @@ async function runAutomation() {
     }
 
     const cachedCatalog = await getCachedSellerCatalog(null, categoryName || "");
-    if (cachedCatalog.valid && !cachedCatalog.clientNameCheckSucceeded) {
-      console.log("Retrying SignalDock validation from the cached seller catalog...");
-      const refreshedStatus = await refreshCachedSignalDockStatuses(cachedCatalog);
-      if (!refreshedStatus.clientNameCheckSucceeded) {
-        console.warn(
-          "SignalDock validation is unavailable; continuing in offline mode with cached seller statuses"
-        );
-      }
+    if (cachedCatalog.valid) {
+      await refreshCachedSignalDockStatuses(cachedCatalog, liveClientCheck);
     }
 
     // Open Filters + Seller panel with retries
@@ -395,6 +410,69 @@ function hasFoundSellerEmail(seller) {
   return Boolean(email) && !email.includes("not found");
 }
 
+function isUsableSellerEmail(value) {
+  const email = String(value || "").trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !/not found/i.test(email);
+}
+
+function createSignalDockClient(seller) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      action: "CREATE_SIGNALDOCK_CLIENT_V1",
+      email: String(seller.email || "").trim(),
+      information: {
+        business_name: String(seller.business_name || seller.seller_name || "").trim(),
+        seller_name: String(seller.seller_name || seller.business_name || "").trim(),
+        store_link: String(seller.store_link || "").trim()
+      }
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ success: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response || { success: false, error: "SignalDock returned no create-client response" });
+    });
+  });
+}
+
+async function queueSignalDockClient(seller) {
+  const email = String(seller.email || "").trim();
+  const pendingValue = await getStorage("signalDockPendingClients", []);
+  const pending = Array.isArray(pendingValue) ? pendingValue : [];
+  const record = {
+    email,
+    information: {
+      business_name: String(seller.business_name || seller.seller_name || "").trim(),
+      seller_name: String(seller.seller_name || seller.business_name || "").trim(),
+      store_link: String(seller.store_link || "").trim()
+    }
+  };
+  const key = email.toLowerCase();
+  const existingIndex = pending.findIndex((item) => String(item.email || "").trim().toLowerCase() === key);
+  if (existingIndex >= 0) pending[existingIndex] = record;
+  else pending.push(record);
+  await setStorage({ signalDockPendingClients: pending });
+}
+
+async function flushPendingSignalDockClients() {
+  const pendingValue = await getStorage("signalDockPendingClients", []);
+  const pending = Array.isArray(pendingValue) ? pendingValue : [];
+  if (pending.length === 0) return;
+
+  const remaining = [];
+  for (const client of pending) {
+    const response = await createSignalDockClient({
+      email: client.email,
+      ...(client.information || {})
+    });
+    if (!response.success) {
+      console.warn(`[SignalDock] Pending client upload will retry later for ${client.email}: ${response.error}`);
+      remaining.push(client);
+    }
+  }
+  await setStorage({ signalDockPendingClients: remaining });
+}
+
 function hasCompletedSoldByLookup(seller) {
   if (!seller) return false;
 
@@ -432,19 +510,19 @@ function hasFoundSellerStatus(seller) {
   );
 }
 
-async function getSignalDockClientNames() {
+async function getSignalDockClientNames(forceRefresh = false) {
   const [cachedNames, cachedSuccess, cachedError] = await Promise.all([
     getStorage("signalDockClientNames", []),
     getStorage("signalDockClientNamesSucceeded", false),
     getStorage("signalDockClientNamesError", "")
   ]);
 
-  if (cachedSuccess === true && Array.isArray(cachedNames)) {
+  if (!forceRefresh && cachedSuccess === true && Array.isArray(cachedNames)) {
     console.log(`[SignalDock] Using ${cachedNames.length} names fetched by the extension popup`);
     return { success: true, names: cachedNames, error: "", usingStaleCache: false };
   }
 
-  if (Array.isArray(cachedNames) && cachedNames.length > 0) {
+  if (!forceRefresh && Array.isArray(cachedNames) && cachedNames.length > 0) {
     console.warn(
       `[SignalDock] Live validation is unavailable; using ${cachedNames.length} cached client names`,
       cachedError || "Last refresh failed"
@@ -465,14 +543,28 @@ async function getSignalDockClientNames() {
           ? `Popup fetch failed: ${cachedError}; background fallback failed: ${backgroundError}`
           : `Background fallback failed: ${backgroundError}`;
         console.warn("[SignalDock]", error);
-        resolve({ success: false, names: [], error });
+        setStorage({
+          signalDockClientNamesSucceeded: false,
+          signalDockClientNamesError: error,
+          signalDockClientNamesCheckedAt: new Date().toISOString(),
+          clientNameCheckSucceeded: false,
+          clientNameCheckError: error,
+          clientNameCheckedAt: new Date().toISOString()
+        }).then(() => resolve({ success: false, names: [], error }));
         return;
       }
 
       if (!response || response.success !== true || !Array.isArray(response.names)) {
         const error = response && response.error ? response.error : "Invalid SignalDock response";
         console.warn("[SignalDock] Background fallback failed:", error);
-        resolve({ success: false, names: [], error });
+        setStorage({
+          signalDockClientNamesSucceeded: false,
+          signalDockClientNamesError: error,
+          signalDockClientNamesCheckedAt: new Date().toISOString(),
+          clientNameCheckSucceeded: false,
+          clientNameCheckError: error,
+          clientNameCheckedAt: new Date().toISOString()
+        }).then(() => resolve({ success: false, names: [], error }));
         return;
       }
 
@@ -483,7 +575,9 @@ async function getSignalDockClientNames() {
         signalDockClientNamesCheckedAt: new Date().toISOString()
       }).then(() => {
         console.log(`[SignalDock] Background fallback loaded ${response.names.length} names`);
-        resolve({ success: true, names: response.names, error: "" });
+        flushPendingSignalDockClients()
+          .catch((error) => console.warn("[SignalDock] Pending client uploads will retry later:", error))
+          .finally(() => resolve({ success: true, names: response.names, error: "" }));
       });
     });
   });
@@ -715,9 +809,9 @@ function applySignalDockResult(sellerRows, clientCheck) {
   return newSellerCount;
 }
 
-async function refreshCachedSignalDockStatuses(cachedCatalog) {
+async function refreshCachedSignalDockStatuses(cachedCatalog, syncedClientCheck = null) {
   const sellerRows = cachedCatalog.sellerData.map((seller) => ({ ...seller }));
-  const clientCheck = await getSignalDockClientNames();
+  const clientCheck = syncedClientCheck || await getSignalDockClientNames();
   const newSellerCount = applySignalDockResult(sellerRows, clientCheck);
 
   await setStorage({
@@ -840,6 +934,9 @@ async function saveSellerData(sellerData) {
   const existingIndex = sellerData.unique_id
     ? data.findIndex((seller) => String(seller.unique_id) === String(sellerData.unique_id))
     : -1;
+  const previousEmail = existingIndex >= 0
+    ? String(data[existingIndex].email || "").trim().toLowerCase()
+    : "";
 
   let savedSeller;
   if (existingIndex >= 0) {
@@ -870,6 +967,24 @@ async function saveSellerData(sellerData) {
   ));
 
   await setStorage({ sellerData: data, sellerNames: synchronizedSellerNames });
+
+  const savedEmail = String(savedSeller.email || "").trim();
+  if (isUsableSellerEmail(savedEmail) && savedEmail.toLowerCase() !== previousEmail) {
+    const response = await createSignalDockClient(savedSeller);
+    if (response.success) {
+      const pendingValue = await getStorage("signalDockPendingClients", []);
+      const pending = Array.isArray(pendingValue) ? pendingValue : [];
+      await setStorage({
+        signalDockPendingClients: pending.filter((client) => (
+          String(client.email || "").trim().toLowerCase() !== savedEmail.toLowerCase()
+        ))
+      });
+      console.log(`[SignalDock] Added seller email to shared client database: ${savedEmail}`);
+    } else {
+      await queueSignalDockClient(savedSeller);
+      console.error(`[SignalDock] Could not add ${savedEmail} to shared client database: ${response.error}`);
+    }
+  }
 }
 
 async function logSellerDataAsJSON() {

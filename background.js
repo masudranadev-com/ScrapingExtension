@@ -1,4 +1,6 @@
-const SIGNALDOCK_CLIENT_NAMES_URL = "http://192.168.0.250:43127//target/client-names";
+const SIGNALDOCK_API_BASE_URL = "http://192.168.0.250:43127/target";
+const SIGNALDOCK_CLIENT_NAMES_URL = `${SIGNALDOCK_API_BASE_URL}/client-names`;
+const SIGNALDOCK_CREATE_CLIENT_URL = `${SIGNALDOCK_API_BASE_URL}/create-client`;
 const PRODUCT_TAB_LOAD_TIMEOUT_MS = 45000;
 const PRODUCT_EXTRACTION_TIMEOUT_MS = 75000;
 const AUTOMATION_WATCHDOG_ALARM = "target-mail-hunter-watchdog";
@@ -439,6 +441,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: errorMessage(error)
         });
       });
+    return true;
+  }
+
+  if (message.action === "CREATE_SIGNALDOCK_CLIENT_V1") {
+    const email = String(message.email || "").trim();
+    const information = message.information && typeof message.information === "object"
+      ? message.information
+      : null;
+    if (!email || !information) {
+      sendResponse({ success: false, error: "A client email and information object are required" });
+      return false;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    fetch(SIGNALDOCK_CREATE_CLIENT_URL, {
+      method: "POST",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ email, information })
+    })
+      .then(async (response) => {
+        const responseText = await response.text();
+        let body = null;
+        try {
+          body = responseText ? JSON.parse(responseText) : null;
+        } catch {
+          body = null;
+        }
+        if (body && (body.status === false || body.success === false)) {
+          throw new Error(body.msg || body.message || "SignalDock rejected the client record");
+        }
+        if (!response.ok) {
+          throw new Error(body && (body.msg || body.message)
+            ? String(body.msg || body.message)
+            : `SignalDock returned HTTP ${response.status}`);
+        }
+        sendResponse({ success: true, status: response.status, body });
+      })
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          error: error && error.name === "AbortError"
+            ? "SignalDock create-client request timed out"
+            : (error && error.message ? error.message : "SignalDock create-client request failed")
+        });
+      })
+      .finally(() => clearTimeout(timeoutId));
     return true;
   }
 

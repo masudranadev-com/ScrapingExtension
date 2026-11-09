@@ -1,7 +1,7 @@
 let isRunning = false;
 const startButton = document.getElementById("start");
 const viewDataButton = document.getElementById("viewData");
-const signalDockClientNamesUrl = "http://192.168.0.250:43127//target/client-names";
+const signalDockClientNamesUrl = "http://192.168.0.250:43127/target/client-names";
 let signalDockSyncPromise = null;
 
 function setLocalStorage(values) {
@@ -272,14 +272,31 @@ startButton.addEventListener("click", async () => {
     currentWindow: true
   });
 
+  if (!tab || !Number.isInteger(tab.id) || !tab.url || !tab.url.startsWith("https://www.target.com/")) {
+    alert("Open a Target category page before starting or stopping automation.");
+    return;
+  }
+
   if (!isRunning) {
-    await syncSignalDockClientNames();
-
+    startButton.disabled = true;
+    startButton.textContent = "Syncing clients…";
     const loaded = await ensureLatestContentScript(tab.id);
-    if (!loaded) return;
+    if (!loaded) {
+      startButton.disabled = false;
+      startButton.textContent = "▶ Start";
+      return;
+    }
 
-    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V10" }, () => {
-      if (chrome.runtime.lastError) return;
+    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V10" }, (response) => {
+      if (chrome.runtime.lastError || !response || response.success !== true) {
+        startButton.disabled = false;
+        startButton.textContent = "▶ Start";
+        const error = response && response.error
+          ? response.error
+          : (chrome.runtime.lastError ? chrome.runtime.lastError.message : "Automation could not be started");
+        alert(`Could not start automation.\n\n${error}`);
+        return;
+      }
       window.close();
     });
   } else {
