@@ -5,6 +5,9 @@ const PRODUCT_TAB_LOAD_TIMEOUT_MS = 45000;
 const PRODUCT_EXTRACTION_TIMEOUT_MS = 75000;
 const AUTOMATION_WATCHDOG_ALARM = "target-mail-hunter-watchdog";
 const AUTOMATION_WATCHDOG_STALE_MS = 3 * 60 * 1000;
+const activeProductTabs = new Set();
+let automationStopGeneration = 0;
+let automationStoppedByUser = false;
 
 function ensureAutomationWatchdogAlarm() {
   chrome.alarms.create(AUTOMATION_WATCHDOG_ALARM, { periodInMinutes: 1 });
@@ -13,7 +16,9 @@ function ensureAutomationWatchdogAlarm() {
 async function restartAutomationTab(tabId, reason) {
   if (!Number.isInteger(tabId)) return false;
 
+  const stopGeneration = automationStopGeneration;
   const stored = await chrome.storage.local.get("automationWatchdog");
+  if (stopGeneration !== automationStopGeneration) return false;
   const current = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
     ? stored.automationWatchdog
     : {};
@@ -31,6 +36,7 @@ async function restartAutomationTab(tabId, reason) {
     automationResumeState: null,
     automationAttemptedSellerIds: []
   });
+  if (stopGeneration !== automationStopGeneration) return false;
 
   console.warn(`[Watchdog] Reloading category tab ${tabId}: ${reason}`, { restartCount });
   return new Promise((resolve) => {
@@ -286,6 +292,7 @@ function activateTab(tabId) {
 }
 
 async function processTargetProduct(message, sender) {
+  const taskGeneration = automationStopGeneration;
   const requestId = message.clientRequestId ||
     `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
@@ -305,10 +312,13 @@ async function processTargetProduct(message, sender) {
     phase = "create-tab";
     const productTab = await createProductTab(productUrl.href, openerTabId, openerWindowId);
     productTabId = productTab.id;
+    activeProductTabs.add(productTabId);
+    if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
     console.log(`[Product ${requestId}] Phase: wait-for-load`, { productTabId });
     phase = "wait-for-load";
     const loadedTab = await waitForTabComplete(productTabId);
+    if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
     console.log(`[Product ${requestId}] Phase: discover-seller-link`, {
       productTabId,
@@ -321,6 +331,7 @@ async function processTargetProduct(message, sender) {
       sellerId: String(message.sellerId || ""),
       sellerIndex: Number(message.sellerIndex) || 0
     });
+    if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
     if (!discovery || discovery.success !== true) {
       throw new Error(discovery && discovery.error
@@ -338,6 +349,7 @@ async function processTargetProduct(message, sender) {
       console.log(`[Product ${requestId}] Phase: navigate-seller-page`, sellerUrl.href);
       phase = "navigate-seller-page";
       const sellerTab = await navigateTabAndWait(productTabId, sellerUrl.href);
+      if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
       console.log(`[Product ${requestId}] Phase: extract-contact`, {
         productTabId,
@@ -371,6 +383,7 @@ async function processTargetProduct(message, sender) {
     };
   } finally {
     if (productTabId !== null) {
+      activeProductTabs.delete(productTabId);
       console.log(`[Product ${requestId}] Phase: close-tab`, { productTabId });
       // Cleanup must never delay the response to the category content script.
       // chrome.tabs.remove() can finish independently after its request is queued.
@@ -381,7 +394,56 @@ async function processTargetProduct(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "STOP_ALL_AUTOMATION_V1") {
+    automationStopGeneration++;
+    automationStoppedByUser = true;
+    const productTabIds = [...activeProductTabs];
+    activeProductTabs.clear();
+    for (const tabId of productTabIds) closeTab(tabId, "stop-all");
+
+    chrome.tabs.query({ url: "https://www.target.com/*" }, async (tabs) => {
+      const queryError = chrome.runtime.lastError;
+      if (queryError) {
+        sendResponse({ success: false, error: queryError.message });
+        return;
+      }
+      for (const tab of tabs) {
+        if (!Number.isInteger(tab.id)) continue;
+        chrome.tabs.sendMessage(tab.id, { action: "STOP_ALL_AUTOMATION_V1" }, () => {
+          void chrome.runtime.lastError;
+        });
+      }
+
+      try {
+        const stored = await chrome.storage.local.get("automationWatchdog");
+        const watchdog = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
+          ? stored.automationWatchdog
+          : {};
+        await chrome.storage.local.set({
+          automationWatchdog: {
+            ...watchdog,
+            desiredRunning: false,
+            forceRestart: false,
+            lastHeartbeat: Date.now(),
+            lastStage: "stopped-by-user"
+          },
+          automationResumeState: null,
+          automationAttemptedSellerIds: []
+        });
+        sendResponse({ success: true, stoppedTabs: tabs.length, closedProductTabs: productTabIds.length });
+      } catch (error) {
+        sendResponse({ success: false, error: errorMessage(error) });
+      }
+    });
+    return true;
+  }
+
   if (message.action === "AUTOMATION_WATCHDOG_UPDATE_V11") {
+    if (automationStoppedByUser && message.stage !== "manual-start") {
+      sendResponse({ success: true, stopped: true });
+      return false;
+    }
+    if (message.stage === "manual-start") automationStoppedByUser = false;
     const tabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
     chrome.storage.local.get("automationWatchdog").then((stored) => {
       const current = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
@@ -415,6 +477,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "PROCESS_TARGET_PRODUCT_V9") {
+    if (automationStoppedByUser) {
+      sendResponse({ success: false, phase: "stopped-by-user", error: "Automation stopped by user" });
+      return false;
+    }
     const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
     processTargetProduct(message, sender)
       .then(async (response) => {

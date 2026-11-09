@@ -1,7 +1,9 @@
 let isRunning = false;
 const startButton = document.getElementById("start");
 const viewDataButton = document.getElementById("viewData");
+const stopAllButton = document.getElementById("stopAll");
 const signalDockClientNamesUrl = "http://192.168.0.250:43127/target/client-names";
+const SIGNALDOCK_ERROR_LOG_LIMIT = 100;
 let signalDockSyncPromise = null;
 
 function setLocalStorage(values) {
@@ -10,6 +12,24 @@ function setLocalStorage(values) {
 
 function getLocalStorage(keys) {
   return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+}
+
+async function logSignalDockError(stage, message, details = {}) {
+  const stored = await getLocalStorage("signalDockErrorLog");
+  const history = Array.isArray(stored.signalDockErrorLog) ? stored.signalDockErrorLog : [];
+  const entry = {
+    timestamp: new Date().toISOString(),
+    stage,
+    endpoint: signalDockClientNamesUrl,
+    message: String(message || "SignalDock request failed"),
+    ...details
+  };
+
+  await setLocalStorage({
+    signalDockLastError: entry,
+    signalDockErrorLog: [entry, ...history].slice(0, SIGNALDOCK_ERROR_LOG_LIMIT)
+  });
+  console.error("[SignalDock] Client-name sync failure", entry);
 }
 
 function normalizeSellerName(value) {
@@ -44,7 +64,9 @@ function hasCompletedSoldByLookup(seller) {
 
 function requestSignalDockFromBackground() {
   return new Promise((resolve, reject) => {
-    const timeoutId = setTimeout(() => reject(new Error("Background request timed out")), 12000);
+    const timeoutId = setTimeout(() => reject(new Error(
+      `Background request timed out after 12 seconds for ${signalDockClientNamesUrl}`
+    )), 12000);
 
     chrome.runtime.sendMessage({ action: "GET_SIGNALDOCK_CLIENT_NAMES" }, (response) => {
       clearTimeout(timeoutId);
@@ -95,9 +117,11 @@ async function requestSignalDockDirectly() {
     return body;
   } catch (error) {
     if (error && error.name === "AbortError") {
-      throw new Error("Direct SignalDock request timed out");
+      throw new Error(`Direct SignalDock request timed out for ${signalDockClientNamesUrl}`);
     }
-    throw error;
+    throw new Error(
+      `Direct SignalDock request failed for ${signalDockClientNamesUrl}: ${error && error.message ? error.message : String(error)}`
+    );
   } finally {
     clearTimeout(timeoutId);
   }
@@ -187,9 +211,10 @@ function syncSignalDockClientNames() {
   if (signalDockSyncPromise) return signalDockSyncPromise;
 
   signalDockSyncPromise = (async () => {
+    let backgroundError = "";
+    let directError = "";
     try {
       let body;
-      let backgroundError = "";
       try {
         body = await requestSignalDockFromBackground();
       } catch (error) {
@@ -197,11 +222,11 @@ function syncSignalDockClientNames() {
         console.warn("[SignalDock] Background request failed; trying direct request:", backgroundError);
         try {
           body = await requestSignalDockDirectly();
-        } catch (directError) {
-          const directMessage = directError && directError.message
-            ? directError.message
+        } catch (directRequestError) {
+          directError = directRequestError && directRequestError.message
+            ? directRequestError.message
             : "Direct request failed";
-          throw new Error(`Background: ${backgroundError}; Direct: ${directMessage}`);
+          throw new Error(`Background: ${backgroundError}; Direct: ${directError}`);
         }
       }
 
@@ -219,7 +244,11 @@ function syncSignalDockClientNames() {
         clientNameCheckError: errorMessage,
         clientNameCheckedAt: new Date().toISOString()
       });
-      console.warn("[SignalDock] API request unavailable; cached/offline mode will be used:", errorMessage, error);
+      await logSignalDockError("client-names-sync", errorMessage, {
+        backgroundError,
+        directError
+      });
+      console.warn("[SignalDock] API request unavailable; cached/offline mode will be used:", errorMessage);
       return { success: false, names: [], error: errorMessage };
     } finally {
       signalDockSyncPromise = null;
@@ -320,5 +349,20 @@ viewDataButton.addEventListener("click", async () => {
   await syncSignalDockClientNames();
   chrome.tabs.create({
     url: chrome.runtime.getURL('viewer.html')
+  });
+});
+
+stopAllButton.addEventListener("click", () => {
+  stopAllButton.disabled = true;
+  stopAllButton.textContent = "Stopping…";
+  chrome.runtime.sendMessage({ action: "STOP_ALL_AUTOMATION_V1" }, (response) => {
+    const runtimeError = chrome.runtime.lastError;
+    if (runtimeError || !response || response.success !== true) {
+      stopAllButton.disabled = false;
+      stopAllButton.textContent = "Stop All";
+      alert(`Could not stop all tasks.\n\n${runtimeError ? runtimeError.message : (response && response.error) || "Unknown error"}`);
+      return;
+    }
+    window.close();
   });
 });
