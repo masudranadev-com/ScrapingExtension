@@ -1,60 +1,17 @@
 importScripts("logger.js");
-
-const SIGNALDOCK_CLIENT_NAMES_URL = "http://localhost:43127/target/client-names";
 const EXTENSION_LOG_STORAGE_KEY = "extensionLogs";
 const MAX_EXTENSION_LOG_ENTRIES = 3000;
 const MAX_EXTENSION_LOG_BYTES = 7 * 1024 * 1024;
+const SIGNALDOCK_API_BASE_URL = "http://192.168.0.250:43127/target";
+const SIGNALDOCK_CLIENT_NAMES_URL = `${SIGNALDOCK_API_BASE_URL}/client-names`;
+const SIGNALDOCK_CREATE_CLIENT_URL = `${SIGNALDOCK_API_BASE_URL}/create-client`;
 const PRODUCT_TAB_LOAD_TIMEOUT_MS = 45000;
 const PRODUCT_EXTRACTION_TIMEOUT_MS = 75000;
 const AUTOMATION_WATCHDOG_ALARM = "target-mail-hunter-watchdog";
 const AUTOMATION_WATCHDOG_STALE_MS = 3 * 60 * 1000;
-let extensionLogWriteQueue = Promise.resolve();
-
-function retainLogsWithinLimits(logs) {
-  const retainedNewestFirst = [];
-  let retainedBytes = 2;
-
-  for (let index = logs.length - 1; index >= 0; index--) {
-    if (retainedNewestFirst.length >= MAX_EXTENSION_LOG_ENTRIES) break;
-
-    let entryBytes;
-    try {
-      entryBytes = new TextEncoder().encode(JSON.stringify(logs[index])).length + 1;
-    } catch {
-      entryBytes = 256;
-    }
-
-    if (retainedNewestFirst.length > 0 && retainedBytes + entryBytes > MAX_EXTENSION_LOG_BYTES) {
-      break;
-    }
-    retainedNewestFirst.push(logs[index]);
-    retainedBytes += entryBytes;
-  }
-
-  return retainedNewestFirst.reverse();
-}
-
-function appendExtensionLog(entry) {
-  extensionLogWriteQueue = extensionLogWriteQueue
-    .then(async () => {
-      const result = await chrome.storage.local.get(EXTENSION_LOG_STORAGE_KEY);
-      const logs = Array.isArray(result[EXTENSION_LOG_STORAGE_KEY])
-        ? result[EXTENSION_LOG_STORAGE_KEY]
-        : [];
-      logs.push(entry);
-      const trimmedLogs = retainLogsWithinLimits(logs);
-      await chrome.storage.local.set({ [EXTENSION_LOG_STORAGE_KEY]: trimmedLogs });
-    })
-    .catch((error) => {
-      if (globalThis.TMHLogger && globalThis.TMHLogger.originalConsole) {
-        globalThis.TMHLogger.originalConsole.error("[TMH Logger] Storage write failed:", error);
-      }
-    });
-
-  return extensionLogWriteQueue;
-}
-
-globalThis.TMHLogStore = { append: appendExtensionLog };
+const activeProductTabs = new Set();
+let automationStopGeneration = 0;
+let automationStoppedByUser = false;
 
 function ensureAutomationWatchdogAlarm() {
   chrome.alarms.create(AUTOMATION_WATCHDOG_ALARM, { periodInMinutes: 1 });
@@ -63,7 +20,9 @@ function ensureAutomationWatchdogAlarm() {
 async function restartAutomationTab(tabId, reason) {
   if (!Number.isInteger(tabId)) return false;
 
+  const stopGeneration = automationStopGeneration;
   const stored = await chrome.storage.local.get("automationWatchdog");
+  if (stopGeneration !== automationStopGeneration) return false;
   const current = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
     ? stored.automationWatchdog
     : {};
@@ -81,6 +40,7 @@ async function restartAutomationTab(tabId, reason) {
     automationResumeState: null,
     automationAttemptedSellerIds: []
   });
+  if (stopGeneration !== automationStopGeneration) return false;
 
   console.warn(`[Watchdog] Reloading category tab ${tabId}: ${reason}`, { restartCount });
   return new Promise((resolve) => {
@@ -100,6 +60,11 @@ ensureAutomationWatchdogAlarm();
 
 chrome.runtime.onInstalled.addListener(ensureAutomationWatchdogAlarm);
 chrome.runtime.onStartup.addListener(ensureAutomationWatchdogAlarm);
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.storage.local.remove("extensionLogs").catch((error) => {
+    console.error("[Logs] Could not clear previously stored logs:", error);
+  });
+});
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (!alarm || alarm.name !== AUTOMATION_WATCHDOG_ALARM) return;
@@ -331,6 +296,7 @@ function activateTab(tabId) {
 }
 
 async function processTargetProduct(message, sender) {
+  const taskGeneration = automationStopGeneration;
   const requestId = message.clientRequestId ||
     `product-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
@@ -350,10 +316,13 @@ async function processTargetProduct(message, sender) {
     phase = "create-tab";
     const productTab = await createProductTab(productUrl.href, openerTabId, openerWindowId);
     productTabId = productTab.id;
+    activeProductTabs.add(productTabId);
+    if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
     console.log(`[Product ${requestId}] Phase: wait-for-load`, { productTabId });
     phase = "wait-for-load";
     const loadedTab = await waitForTabComplete(productTabId);
+    if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
     console.log(`[Product ${requestId}] Phase: discover-seller-link`, {
       productTabId,
@@ -366,6 +335,7 @@ async function processTargetProduct(message, sender) {
       sellerId: String(message.sellerId || ""),
       sellerIndex: Number(message.sellerIndex) || 0
     });
+    if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
     if (!discovery || discovery.success !== true) {
       throw new Error(discovery && discovery.error
@@ -383,6 +353,7 @@ async function processTargetProduct(message, sender) {
       console.log(`[Product ${requestId}] Phase: navigate-seller-page`, sellerUrl.href);
       phase = "navigate-seller-page";
       const sellerTab = await navigateTabAndWait(productTabId, sellerUrl.href);
+      if (taskGeneration !== automationStopGeneration) throw new Error("Automation stopped by user");
 
       console.log(`[Product ${requestId}] Phase: extract-contact`, {
         productTabId,
@@ -416,6 +387,7 @@ async function processTargetProduct(message, sender) {
     };
   } finally {
     if (productTabId !== null) {
+      activeProductTabs.delete(productTabId);
       console.log(`[Product ${requestId}] Phase: close-tab`, { productTabId });
       // Cleanup must never delay the response to the category content script.
       // chrome.tabs.remove() can finish independently after its request is queued.
@@ -426,16 +398,56 @@ async function processTargetProduct(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === "APPEND_EXTENSION_LOG") {
-    const entry = {
-      ...(message.entry && typeof message.entry === "object" ? message.entry : {}),
-      tabId: sender.tab && sender.tab.id !== undefined ? sender.tab.id : null
-    };
-    appendExtensionLog(entry).then(() => sendResponse({ success: true }));
+  if (message.action === "STOP_ALL_AUTOMATION_V1") {
+    automationStopGeneration++;
+    automationStoppedByUser = true;
+    const productTabIds = [...activeProductTabs];
+    activeProductTabs.clear();
+    for (const tabId of productTabIds) closeTab(tabId, "stop-all");
+
+    chrome.tabs.query({ url: "https://www.target.com/*" }, async (tabs) => {
+      const queryError = chrome.runtime.lastError;
+      if (queryError) {
+        sendResponse({ success: false, error: queryError.message });
+        return;
+      }
+      for (const tab of tabs) {
+        if (!Number.isInteger(tab.id)) continue;
+        chrome.tabs.sendMessage(tab.id, { action: "STOP_ALL_AUTOMATION_V1" }, () => {
+          void chrome.runtime.lastError;
+        });
+      }
+
+      try {
+        const stored = await chrome.storage.local.get("automationWatchdog");
+        const watchdog = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
+          ? stored.automationWatchdog
+          : {};
+        await chrome.storage.local.set({
+          automationWatchdog: {
+            ...watchdog,
+            desiredRunning: false,
+            forceRestart: false,
+            lastHeartbeat: Date.now(),
+            lastStage: "stopped-by-user"
+          },
+          automationResumeState: null,
+          automationAttemptedSellerIds: []
+        });
+        sendResponse({ success: true, stoppedTabs: tabs.length, closedProductTabs: productTabIds.length });
+      } catch (error) {
+        sendResponse({ success: false, error: errorMessage(error) });
+      }
+    });
     return true;
   }
 
   if (message.action === "AUTOMATION_WATCHDOG_UPDATE_V11") {
+    if (automationStoppedByUser && message.stage !== "manual-start") {
+      sendResponse({ success: true, stopped: true });
+      return false;
+    }
+    if (message.stage === "manual-start") automationStoppedByUser = false;
     const tabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
     chrome.storage.local.get("automationWatchdog").then((stored) => {
       const current = stored.automationWatchdog && typeof stored.automationWatchdog === "object"
@@ -469,6 +481,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "PROCESS_TARGET_PRODUCT_V9") {
+    if (automationStoppedByUser) {
+      sendResponse({ success: false, phase: "stopped-by-user", error: "Automation stopped by user" });
+      return false;
+    }
     const openerTabId = sender.tab && Number.isInteger(sender.tab.id) ? sender.tab.id : null;
     processTargetProduct(message, sender)
       .then(async (response) => {
@@ -495,6 +511,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: errorMessage(error)
         });
       });
+    return true;
+  }
+
+  if (message.action === "CREATE_SIGNALDOCK_CLIENT_V1") {
+    const email = String(message.email || "").trim();
+    const information = message.information && typeof message.information === "object"
+      ? message.information
+      : null;
+    if (!email || !information) {
+      sendResponse({ success: false, error: "A client email and information object are required" });
+      return false;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    fetch(SIGNALDOCK_CREATE_CLIENT_URL, {
+      method: "POST",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ email, information })
+    })
+      .then(async (response) => {
+        const responseText = await response.text();
+        let body = null;
+        try {
+          body = responseText ? JSON.parse(responseText) : null;
+        } catch {
+          body = null;
+        }
+        if (body && (body.status === false || body.success === false)) {
+          throw new Error(body.msg || body.message || "SignalDock rejected the client record");
+        }
+        if (!response.ok) {
+          throw new Error(body && (body.msg || body.message)
+            ? String(body.msg || body.message)
+            : `SignalDock returned HTTP ${response.status}`);
+        }
+        sendResponse({ success: true, status: response.status, body });
+      })
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          error: error && error.name === "AbortError"
+            ? "SignalDock create-client request timed out"
+            : (error && error.message ? error.message : "SignalDock create-client request failed")
+        });
+      })
+      .finally(() => clearTimeout(timeoutId));
     return true;
   }
 
