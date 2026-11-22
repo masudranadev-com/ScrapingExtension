@@ -1,6 +1,6 @@
 importScripts("logger.js");
 
-const SIGNALDOCK_CLIENT_NAMES_URL = "http://localhost:3000/target/client-names";
+const SIGNALDOCK_CLIENT_NAMES_URL = "http://localhost:43127/target/client-names";
 const EXTENSION_LOG_STORAGE_KEY = "extensionLogs";
 const MAX_EXTENSION_LOG_ENTRIES = 3000;
 const MAX_EXTENSION_LOG_BYTES = 7 * 1024 * 1024;
