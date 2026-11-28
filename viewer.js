@@ -66,6 +66,11 @@ document.getElementById('downloadJSON').addEventListener('click', () => {
   downloadFile(JSON.stringify(allData, null, 2), `${prefix}.json`, 'application/json');
 });
 
+document.getElementById('downloadKeywordResults').addEventListener('click', async () => {
+  const { keywordResults } = await chrome.storage.local.get('keywordResults');
+  downloadFile(JSON.stringify(Array.isArray(keywordResults) ? keywordResults : [], null, 2), 'completed-keywords.json', 'application/json');
+});
+
 // Download CSV
 document.getElementById('downloadCSV').addEventListener('click', () => {
   const prefix = getFilePrefix();
@@ -86,7 +91,7 @@ function getFilePrefix() {
 // Clear data
 document.getElementById('clearData').addEventListener('click', () => {
   if (confirm('Are you sure you want to delete ALL seller data? This cannot be undone!')) {
-    chrome.storage.local.remove(['sellerNames', 'sellerData', 'currentSellerIndex', 'categoryName', 'breadcrumbSteps', 'totalSellers', 'newSellers', 'clientNameCheckSucceeded', 'clientNameCheckError', 'clientNameCheckedAt', 'sellerCatalogCategoryName', 'signalDockClientNames', 'signalDockClientNamesSucceeded', 'signalDockClientNamesError', 'signalDockClientNamesCheckedAt'], () => {
+    chrome.storage.local.remove(['keywordResults', 'sellerNames', 'sellerData', 'currentSellerIndex', 'categoryName', 'breadcrumbSteps', 'totalSellers', 'newSellers', 'clientNameCheckSucceeded', 'clientNameCheckError', 'clientNameCheckedAt', 'sellerCatalogCategoryName', 'signalDockClientNames', 'signalDockClientNamesSucceeded', 'signalDockClientNamesError', 'signalDockClientNamesCheckedAt'], () => {
       console.log('All data cleared');
       loadData();
     });
@@ -96,34 +101,8 @@ document.getElementById('clearData').addEventListener('click', () => {
 // Load data from chrome.storage
 function loadData() {
   chrome.storage.local.get(['sellerNames', 'sellerData', 'categoryName', 'breadcrumbSteps', 'totalSellers', 'newSellers', 'clientNameCheckSucceeded', 'clientNameCheckError'], (result) => {
-    let cacheChanged = false;
-    const storedSellerData = (Array.isArray(result.sellerData) ? result.sellerData : []).map((seller) => {
-      if (hasCompletedSoldByLookup(seller) && String(seller.status || '').trim().toLowerCase() !== 'found') {
-        cacheChanged = true;
-        return { ...seller, status: 'Found' };
-      }
-      return seller;
-    });
-    const completedSellerIds = new Set(
-      storedSellerData
-        .filter(hasCompletedSoldByLookup)
-        .map((seller) => String(seller.unique_id || ''))
-        .filter(Boolean)
-    );
-    sellerNames = (Array.isArray(result.sellerNames) ? result.sellerNames : []).map((seller) => {
-      if (
-        completedSellerIds.has(String(seller.unique_id || '')) &&
-        String(seller.status || '').trim().toLowerCase() !== 'found'
-      ) {
-        cacheChanged = true;
-        return { ...seller, status: 'Found' };
-      }
-      return seller;
-    });
-
-    if (cacheChanged) {
-      chrome.storage.local.set({ sellerData: storedSellerData, sellerNames });
-    }
+    const storedSellerData = Array.isArray(result.sellerData) ? result.sellerData : [];
+    sellerNames = Array.isArray(result.sellerNames) ? result.sellerNames : [];
 
     allData = mergeSellerNamesWithData(sellerNames, storedSellerData);
     categoryName = result.categoryName || '';
@@ -192,8 +171,9 @@ function mergeSellerNamesWithData(nameRows, dataRows) {
 }
 
 function hasFoundSellerEmail(seller) {
-  const email = String((seller && seller.email) || '').trim().toLowerCase();
-  return Boolean(email) && !email.includes('not found');
+  if (seller && seller.is_placeholder_email === true) return false;
+  const email = String((seller && seller.email) || '').trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !/not found/i.test(email);
 }
 
 function hasCompletedSoldByLookup(seller) {
@@ -216,10 +196,9 @@ function hasCompletedSoldByLookup(seller) {
 function hasFoundSellerStatus(seller) {
   return Boolean(
     seller && (
-      String(seller.status || '').trim().toLowerCase() === 'found' ||
       seller.is_existing_client === true ||
       seller.is_duplicate_seller === true ||
-      hasCompletedSoldByLookup(seller) ||
+      seller.sold_by_missing === true ||
       hasFoundSellerEmail(seller)
     )
   );
@@ -297,7 +276,8 @@ function renderTable() {
   tableBody.innerHTML = filteredData.map((seller, index) => {
     const sourceIndex = allData.indexOf(seller);
     const hasFoundStatus = hasFoundSellerStatus(seller);
-    const statusBadge = hasFoundStatus
+    const statusBadge = seller.sold_by_missing && !hasFoundSellerEmail(seller)
+      ? '<span class="badge badge-success">Completed</span>' : hasFoundStatus
       ? '<span class="badge badge-success">✓ Found</span>'
       : '<span class="badge badge-danger">✗ Not Found</span>';
 

@@ -1,10 +1,10 @@
 // --------------------
 // Prevent duplicate injection
 // --------------------
-if (window.__targetMailHunterVersion === "9.0.6") {
+if (window.__targetMailHunterVersion === "9.0.7") {
   console.log("Content script already loaded, skipping re-injection");
 } else {
-window.__targetMailHunterVersion = "9.0.6";
+window.__targetMailHunterVersion = "9.0.7";
 window.__targetMailHunterLoaded = true;
 
 // --------------------
@@ -15,6 +15,8 @@ let isAutomationRunning = false;
 let sellerDiscoveryPromise = null;
 let automationGeneration = 0;
 let automationHeartbeatTimer = null;
+let keywordRunIndex = null;
+let keywordRunId = null;
 const pendingProductRequests = window.__targetMailHunterPendingProductRequests instanceof Map
   ? window.__targetMailHunterPendingProductRequests
   : new Map();
@@ -34,6 +36,7 @@ function updateAutomationWatchdog(desiredRunning, stage, forceRestart = false) {
       desiredRunning,
       forceRestart,
       stage,
+      runId: keywordRunId,
       categoryPathname: window.location.pathname
     }, (response) => {
       void chrome.runtime.lastError;
@@ -58,13 +61,21 @@ function stopAutomationHeartbeat() {
   automationHeartbeatTimer = null;
 }
 
-async function finishAutomationRun(stage = "complete") {
+async function finishAutomationRun(stage = "complete", reason = "") {
   stopAutomationHeartbeat();
   await updateAutomationWatchdog(false, stage, false);
+  if (keywordRunIndex !== null && !shouldStopAutomation) {
+    const complete = stage === "all-sellers-attempted" || stage === "all-sellers-complete";
+    await chrome.runtime.sendMessage({ action: complete ? "KEYWORD_COMPLETE" : "KEYWORD_ERROR", index: keywordRunIndex, runId: keywordRunId, error: reason || stage });
+  }
 }
 
 async function requestAutomationRestart(reason) {
   stopAutomationHeartbeat();
+  if (keywordRunIndex !== null) {
+    await chrome.runtime.sendMessage({ action: "KEYWORD_ERROR", index: keywordRunIndex, runId: keywordRunId, error: reason });
+    return false;
+  }
   console.error(`🔁 Requesting complete automation restart: ${reason}`);
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({
@@ -252,12 +263,71 @@ async function saveCategoryData(categoryName, breadcrumbSteps) {
 // --------------------
 // Main flow
 // --------------------
+function getAppliedFilterButtons() {
+  return [...document.querySelectorAll('button[data-test^="applied-facet-button-"]')]
+    .filter(button => !button.closest('[role="dialog"], [hidden], [aria-hidden="true"], [inert]') &&
+      button.isConnected !== false && button.getClientRects().length > 0);
+}
+
+async function clearAppliedFilters(timeout = 45000) {
+  const start = Date.now();
+  let removed = 0;
+  while (Date.now() - start < timeout) {
+    if (shouldStopAutomation) return false;
+    const buttons = getAppliedFilterButtons();
+    if (!buttons.length) {
+      // A filter update can briefly remove all chips before the next render.
+      await sleep(750);
+      if (shouldStopAutomation) return false;
+      if (!getAppliedFilterButtons().length) {
+        logFilterDiagnostic("applied-filters-cleared", { attempt: removed });
+        return true;
+      }
+      continue;
+    }
+
+    const button = buttons[0];
+    const filterId = button.getAttribute("data-test") || "";
+    const filterName = button.getAttribute("aria-label") || button.textContent.trim();
+    let cleared = false;
+    for (let attempt = 1; attempt <= 2 && !cleared; attempt++) {
+      if (shouldStopAutomation) return false;
+      const current = getAppliedFilterButtons().find(item => item.getAttribute("data-test") === filterId);
+      if (!current) { cleared = true; break; }
+      if (current.disabled || current.getAttribute("aria-disabled") === "true") break;
+      logFilterDiagnostic("remove-applied-filter", { optionId: filterId, optionName: filterName, attempt });
+      reportAutomationProgress("removing-applied-filter");
+      scrollToAndClick(current);
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 5000 && Date.now() - start < timeout) {
+        if (shouldStopAutomation) return false;
+        await sleep(250);
+        if (!getAppliedFilterButtons().some(item => item.getAttribute("data-test") === filterId)) {
+          cleared = true;
+          break;
+        }
+      }
+    }
+    if (!cleared) {
+      const error = `Could not remove applied filter: ${filterName || filterId}`;
+      logFilterDiagnostic("remove-applied-filter-failed", { optionId: filterId, optionName: filterName, error });
+      throw new Error(error);
+    }
+    removed++;
+  }
+  throw new Error("Timed out while removing applied filters");
+}
+
 async function openFiltersAndSellerPanel(maxRetries = 5) {
+  let selectedFacet = await getStorage("automationFacet", "");
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     if (shouldStopAutomation) return false;
 
     reportAutomationProgress(`open-filters-attempt-${attempt}`);
     console.log(`🔄 [Attempt ${attempt}/${maxRetries}] Opening Filters + Seller panel...`);
+
+    if (!await clearAppliedFilters()) return false;
+    if (shouldStopAutomation) return false;
 
     // Open Filters
     console.log("🖱️  Clicking: Filters menu");
@@ -271,9 +341,24 @@ async function openFiltersAndSellerPanel(maxRetries = 5) {
       continue;
     }
 
-    // Open Sold by
-    console.log("🖱️  Clicking: Sold by button");
-    click('[data-test="facet-group-d_sellers_all"]');
+    // Prefer sellers; some search results expose brands instead.
+    const modal = getModal();
+    const soldByButton = modal && modal.querySelector('[data-test="facet-group-d_sellers_all"]');
+    const brandButton = modal && modal.querySelector('[data-test="facet-group-d_brand_all"]');
+    const facetButton = selectedFacet === "sold-by" ? soldByButton
+      : selectedFacet === "brand" ? brandButton : soldByButton || brandButton;
+    if (!facetButton) {
+      console.warn(`Required filter ${selectedFacet || "Sold by or Brand"} is unavailable; retrying...`);
+      const closeBtn = modal && (modal.querySelector('[data-test="modal-close-button"]') || modal.querySelector('button[aria-label="close"], button[aria-label="Close"]'));
+      if (closeBtn) scrollToAndClick(closeBtn);
+      await sleep(2000);
+      continue;
+    }
+    selectedFacet = facetButton === soldByButton ? "sold-by" : "brand";
+    await setStorage({ automationFacet: selectedFacet });
+    if (shouldStopAutomation) return false;
+    console.log(`Opening ${selectedFacet === "sold-by" ? "Sold by" : "Brand"} filter`);
+    scrollToAndClick(facetButton);
     await sleep(1200);
 
     const sellerPanelOpen = await verifySellerPanelOpen();
@@ -340,7 +425,7 @@ async function runAutomation(syncedClientCheck = null) {
     if (wasStopped()) return;
     if (!liveClientCheck.success) {
       console.error(`[SignalDock] Cannot start automation without a live client-list sync: ${liveClientCheck.error}`);
-      await finishAutomationRun("client-list-sync-failed");
+      await finishAutomationRun("client-list-sync-failed", liveClientCheck.error);
       return;
     }
 
@@ -425,8 +510,7 @@ function isMissingBusinessName(value) {
 }
 
 function hasFoundSellerEmail(seller) {
-  const email = String((seller && seller.email) || "").trim().toLowerCase();
-  return Boolean(email) && !email.includes("not found");
+  return Boolean(seller && seller.is_placeholder_email !== true && isUsableSellerEmail(seller.email));
 }
 
 function isUsableSellerEmail(value) {
@@ -480,6 +564,8 @@ async function flushPendingSignalDockClients() {
 
   const remaining = [];
   for (const client of pending) {
+    if (shouldStopAutomation) throw new Error("Automation stopped");
+    reportAutomationProgress("uploading-pending-clients");
     const response = await createSignalDockClient({
       email: client.email,
       ...(client.information || {})
@@ -490,6 +576,7 @@ async function flushPendingSignalDockClients() {
     }
   }
   await setStorage({ signalDockPendingClients: remaining });
+  if (remaining.length && keywordRunIndex !== null) throw new Error(`Could not upload ${remaining.length} pending client(s) to SignalDock`);
 }
 
 function hasCompletedSoldByLookup(seller) {
@@ -520,10 +607,9 @@ function normalizeSellerName(value) {
 function hasFoundSellerStatus(seller) {
   return Boolean(
     seller && (
-      String(seller.status || "").trim().toLowerCase() === "found" ||
       seller.is_existing_client === true ||
       seller.is_duplicate_seller === true ||
-      hasCompletedSoldByLookup(seller) ||
+      seller.sold_by_missing === true ||
       hasFoundSellerEmail(seller)
     )
   );
@@ -595,8 +681,8 @@ async function getSignalDockClientNames(forceRefresh = false) {
       }).then(() => {
         console.log(`[SignalDock] Background fallback loaded ${response.names.length} names`);
         flushPendingSignalDockClients()
-          .catch((error) => console.warn("[SignalDock] Pending client uploads will retry later:", error))
-          .finally(() => resolve({ success: true, names: response.names, error: "" }));
+          .then(() => resolve({ success: true, names: response.names, error: "" }))
+          .catch((error) => resolve({ success: false, names: [], error: error.message || String(error) }));
       });
     });
   });
@@ -787,7 +873,7 @@ function filterSellerCheckboxes(inputs) {
   return { sellerCheckboxes, skipped, disabled };
 }
 
-function applySignalDockResult(sellerRows, clientCheck) {
+function applySignalDockResult(sellerRows, clientCheck, facet = "sold-by") {
   let newSellerCount = 0;
 
   if (clientCheck.success) {
@@ -800,19 +886,15 @@ function applySignalDockResult(sellerRows, clientCheck) {
 
     for (const seller of sellerRows) {
       const normalizedName = normalizeSellerName(seller.seller_name);
-      const isExistingClient = existingClientNames.has(normalizedName);
-      const isDuplicateSeller = seenCurrentSellerNames.has(normalizedName);
+      const isExistingClient = facet !== "brand" && existingClientNames.has(normalizedName);
+      const isDuplicateSeller = facet !== "brand" && seenCurrentSellerNames.has(normalizedName);
       seenCurrentSellerNames.add(normalizedName);
 
       seller.is_existing_client = isExistingClient;
       seller.is_duplicate_seller = isDuplicateSeller;
       seller.is_new_seller = !isExistingClient && !isDuplicateSeller;
-      seller.status = (
-        isExistingClient ||
-        isDuplicateSeller ||
-        hasCompletedSoldByLookup(seller) ||
-        hasFoundSellerEmail(seller)
-      ) ? "Found" : "Not Found";
+      seller.status = seller.sold_by_missing === true && !hasFoundSellerEmail(seller)
+        ? "Completed" : hasFoundSellerStatus(seller) ? "Found" : "Not Found";
 
       if (seller.is_new_seller) newSellerCount++;
     }
@@ -821,7 +903,8 @@ function applySignalDockResult(sellerRows, clientCheck) {
     console.log(`SignalDock found ${newSellerCount} unique new sellers`);
   } else {
     for (const seller of sellerRows) {
-      seller.status = hasFoundSellerStatus(seller) ? "Found" : "Not Found";
+      seller.status = seller.sold_by_missing === true && !hasFoundSellerEmail(seller)
+        ? "Completed" : hasFoundSellerStatus(seller) ? "Found" : "Not Found";
       seller.is_new_seller = seller.is_new_seller === true;
     }
     newSellerCount = sellerRows.filter((seller) => seller.is_new_seller).length;
@@ -834,7 +917,7 @@ function applySignalDockResult(sellerRows, clientCheck) {
 async function refreshCachedSignalDockStatuses(cachedCatalog, syncedClientCheck = null) {
   const sellerRows = cachedCatalog.sellerData.map((seller) => ({ ...seller }));
   const clientCheck = syncedClientCheck || await getSignalDockClientNames();
-  const newSellerCount = applySignalDockResult(sellerRows, clientCheck);
+  const newSellerCount = applySignalDockResult(sellerRows, clientCheck, await getStorage("automationFacet", "sold-by"));
 
   await setStorage({
     sellerNames: sellerRows.map((seller) => ({
@@ -901,7 +984,7 @@ async function initializeSellerRows(sellerCheckboxes) {
   });
 
   const clientCheck = await getSignalDockClientNames();
-  const newSellerCount = applySignalDockResult(sellerRows, clientCheck);
+  const newSellerCount = applySignalDockResult(sellerRows, clientCheck, await getStorage("automationFacet", "sold-by"));
 
   const sellerCatalogCategoryName = extractCategoryName() || await getStorage("categoryName", "");
 
@@ -948,6 +1031,8 @@ async function saveSellerData(sellerData) {
     mobile_number: "Not found",
     store_link: "Not found",
     error_reason: "",
+    is_placeholder_email: false,
+    sold_by_missing: false,
     status: "Not Found",
     is_existing_client: false,
     is_duplicate_seller: false,
@@ -959,11 +1044,17 @@ async function saveSellerData(sellerData) {
   const previousEmail = existingIndex >= 0
     ? String(data[existingIndex].email || "").trim().toLowerCase()
     : "";
+  const previousWasPlaceholder = existingIndex >= 0 && data[existingIndex].is_placeholder_email === true;
 
   let savedSeller;
   if (existingIndex >= 0) {
     const existingSeller = data[existingIndex];
     const updatedSeller = { ...defaults, ...existingSeller, ...sellerData };
+    if (Object.prototype.hasOwnProperty.call(sellerData, "email")) {
+      updatedSeller.is_placeholder_email = sellerData.is_placeholder_email === true;
+      updatedSeller.sold_by_missing = sellerData.sold_by_missing === true;
+      if (!Object.prototype.hasOwnProperty.call(sellerData, "error_reason") && isUsableSellerEmail(sellerData.email)) updatedSeller.error_reason = "";
+    }
 
     if (
       isMissingBusinessName(sellerData.business_name) &&
@@ -972,12 +1063,14 @@ async function saveSellerData(sellerData) {
       updatedSeller.business_name = existingSeller.business_name;
     }
 
-    updatedSeller.status = hasFoundSellerStatus(updatedSeller) ? "Found" : "Not Found";
+    updatedSeller.status = updatedSeller.sold_by_missing && !hasFoundSellerEmail(updatedSeller)
+      ? "Completed" : hasFoundSellerStatus(updatedSeller) ? "Found" : "Not Found";
     data[existingIndex] = updatedSeller;
     savedSeller = updatedSeller;
   } else {
     const newSeller = { ...defaults, ...sellerData };
-    newSeller.status = hasFoundSellerStatus(newSeller) ? "Found" : "Not Found";
+    newSeller.status = newSeller.sold_by_missing && !hasFoundSellerEmail(newSeller)
+      ? "Completed" : hasFoundSellerStatus(newSeller) ? "Found" : "Not Found";
     data.push(newSeller);
     savedSeller = newSeller;
   }
@@ -991,8 +1084,12 @@ async function saveSellerData(sellerData) {
   await setStorage({ sellerData: data, sellerNames: synchronizedSellerNames });
 
   const savedEmail = String(savedSeller.email || "").trim();
-  if (isUsableSellerEmail(savedEmail) && savedEmail.toLowerCase() !== previousEmail) {
-    const response = await createSignalDockClient(savedSeller);
+  if (!savedSeller.is_placeholder_email && isUsableSellerEmail(savedEmail) && (savedEmail.toLowerCase() !== previousEmail || previousWasPlaceholder)) {
+    const facet = await getStorage("automationFacet", "sold-by");
+    const sellerForUpload = facet === "brand" && !isMissingBusinessName(savedSeller.business_name)
+      ? { ...savedSeller, seller_name: savedSeller.business_name }
+      : savedSeller;
+    const response = await createSignalDockClient(sellerForUpload);
     if (response.success) {
       const pendingValue = await getStorage("signalDockPendingClients", []);
       const pending = Array.isArray(pendingValue) ? pendingValue : [];
@@ -1003,8 +1100,9 @@ async function saveSellerData(sellerData) {
       });
       console.log(`[SignalDock] Added seller email to shared client database: ${savedEmail}`);
     } else {
-      await queueSignalDockClient(savedSeller);
+      await queueSignalDockClient(sellerForUpload);
       console.error(`[SignalDock] Could not add ${savedEmail} to shared client database: ${response.error}`);
+      if (keywordRunIndex !== null) throw new Error(`Could not upload ${savedEmail}: ${response.error}`);
     }
   }
 }
@@ -1040,30 +1138,66 @@ function waitForSelector(selector, timeout = 15000) {
   });
 }
 
-async function waitForFirstProductLink(timeout = 30000, pollInterval = 500) {
+function findProductLinks() {
+  const selectors = [
+    '[data-test="@web/site-top-of-funnel/ProductCardWrapper"] a[href*="/p/"]',
+    'a[data-test="@web/ProductCard/title"]',
+    'main a[href*="/p/"]',
+    '[role="main"] a[href*="/p/"]'
+  ];
+  const links = [];
+  const seen = new Set();
+  for (const selector of selectors) {
+    for (const link of document.querySelectorAll(selector)) {
+      if (link.closest('header, nav, [role="dialog"], [aria-hidden="true"]')) continue;
+      let url;
+      try { url = new URL(link.href, window.location.href); } catch { continue; }
+      if (url.protocol !== "https:" || url.hostname !== "www.target.com" || !url.pathname.includes("/p/")) continue;
+      const key = url.origin + url.pathname;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      links.push(url.href);
+    }
+    if (links.length) break;
+  }
+  return links;
+}
+
+async function waitForProductLinks(timeout = 45000, pollInterval = 500) {
   console.log(`Waiting up to ${Math.round(timeout / 1000)} seconds for a product...`);
   const start = Date.now();
   let lastProgressReport = 0;
+  let stableSince = 0;
+  let previousLinks = "";
 
   while (Date.now() - start < timeout) {
-    if (shouldStopAutomation) return null;
+    if (shouldStopAutomation) return [];
 
     if (Date.now() - lastProgressReport >= 10000) {
       reportAutomationProgress("waiting-for-filtered-product");
       lastProgressReport = Date.now();
     }
 
-    const productLink = document.querySelector('a[data-test="@web/ProductCard/title"]');
-    if (productLink && productLink.href) {
-      console.log(`Product found after ${Math.ceil((Date.now() - start) / 1000)} second(s)`);
-      return productLink;
+    const links = findProductLinks();
+    const busy = getModal() || document.querySelector('main [aria-busy="true"], [role="main"] [aria-busy="true"]');
+    const signature = links.join("\n");
+    if (!busy && links.length) {
+      if (signature !== previousLinks || !stableSince) stableSince = Date.now();
+      previousLinks = signature;
+      if (Date.now() - start >= 5000 && Date.now() - stableSince >= 2000) {
+        console.log(`Found ${links.length} filtered product(s)`);
+        return links;
+      }
+    } else {
+      stableSince = 0;
+      previousLinks = "";
     }
 
     await sleep(pollInterval);
   }
 
   console.warn(`No product appeared within ${Math.round(timeout / 1000)} seconds`);
-  return null;
+  return [];
 }
 
 // --------------------
@@ -1093,7 +1227,7 @@ async function verifyModalOpen(timeout = 5000) {
   console.log("🔍 Verifying modal is open...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    const modal = document.querySelector('div[role="dialog"][aria-modal="true"]');
+    const modal = getModal();
     if (modal) {
       console.log("✅ Modal confirmed open");
       return true;
@@ -1109,8 +1243,8 @@ async function verifySellerPanelOpen(timeout = 5000) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
     const checkboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
-    if (checkboxes.length > 1) {
-      console.log(`✅ Seller panel confirmed open (${checkboxes.length} checkboxes found)`);
+    if (filterSellerCheckboxes(checkboxes).sellerCheckboxes.length > 0) {
+      console.log(`✅ Filter panel confirmed open (${checkboxes.length} checkboxes found)`);
       return true;
     }
     await sleep(200);
@@ -1123,7 +1257,7 @@ async function verifyProductListingPage(timeout = 5000) {
   console.log("🔍 Verifying we're on product listing page...");
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    const productCards = document.querySelectorAll('[data-test="@web/site-top-of-funnel/ProductCardWrapper"]');
+    const productCards = findProductLinks();
     if (productCards.length > 0) {
       console.log(`✅ Product listing confirmed (${productCards.length} products found)`);
       return true;
@@ -1209,13 +1343,134 @@ function clickElement(element, description = "element") {
 }
 
 function getModal() {
-  return document.querySelector('div[role="dialog"][aria-modal="true"]');
+  const dialogs = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')];
+  const visible = dialogs.filter(isVisibleFilterElement);
+  return visible.find(dialog => dialog.querySelector('input[data-test^="facet-checkbox-"], [data-test^="facet-group-"], [data-test="@web/FacetModalButtons/ApplyButton"]')) || visible[0] || null;
+}
+
+function isVisibleFilterElement(element) {
+  if (!element || element.isConnected === false || element.closest('[hidden], [aria-hidden="true"], [inert]')) return false;
+  const style = getComputedStyle(element);
+  return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+}
+
+function logFilterDiagnostic(stage, details = {}) {
+  const entry = { timestamp: new Date().toISOString(), stage, path: window.location.pathname,
+    keywordIndex: keywordRunIndex, ...details };
+  console.log("[Filter Debug]", entry);
+  try {
+    chrome.runtime.sendMessage({ action: "FILTER_DIAGNOSTIC", entry }, () => { void chrome.runtime.lastError; });
+  } catch (error) {
+    console.warn("[Filter Debug] Could not send diagnostic:", error);
+  }
+}
+
+function findFilterApplyButtons(modal) {
+  const exact = '[data-test="@web/FacetModalButtons/ApplyButton"]';
+  const candidates = [];
+  const seen = new Set();
+  const applyLabel = /^(?:apply(?:\s+(?:all\s+)?(?:filters?|selection))?|(?:show|view|see)\s+(?:all\s+)?(?:\d[\d,]*\s+)?(?:results?|items?|products?))(?:\s*\([^)]*\))?$/i;
+  function add(element, exactMatch) {
+    if (!element || seen.has(element)) return;
+    const label = String(element.innerText || element.textContent || element.value || element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+    if (!exactMatch && !applyLabel.test(label)) return;
+    seen.add(element);
+    candidates.push({ element, label, visible: isVisibleFilterElement(element),
+      disabled: Boolean(element.disabled || element.matches(':disabled, [aria-disabled="true"]')) });
+  }
+  if (modal) {
+    for (const element of modal.querySelectorAll(exact)) add(element, true);
+    for (const element of modal.querySelectorAll('button, input[type="submit"], [role="button"]')) add(element, false);
+  }
+  // Target may render the filter footer in a separate portal.
+  for (const element of document.querySelectorAll(exact)) add(element, true);
+  if (!candidates.some(candidate => candidate.visible && !candidate.disabled)) {
+    const outside = [...document.querySelectorAll('button, input[type="submit"], [role="button"]')]
+      .filter(element => !seen.has(element) && !element.closest('[role="dialog"]') && isVisibleFilterElement(element))
+      .filter(element => applyLabel.test(String(element.innerText || element.textContent || element.value || element.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim()));
+    if (outside.length === 1) add(outside[0], false);
+  }
+  return candidates;
+}
+
+async function waitForEnabledFilterApply(stage, timeout = 10000) {
+  const start = Date.now();
+  let lastSnapshot = "";
+  while (Date.now() - start < timeout) {
+    if (shouldStopAutomation) throw new Error("Automation stopped");
+    const modal = getModal();
+    if (!modal) return null;
+    const candidates = findFilterApplyButtons(modal);
+    const snapshot = candidates.map(({ label, visible, disabled }) => ({ label, visible, disabled }));
+    const serialized = JSON.stringify(snapshot);
+    if (serialized !== lastSnapshot) {
+      logFilterDiagnostic(`${stage}-buttons`, { buttons: snapshot });
+      lastSnapshot = serialized;
+    }
+    const ready = candidates.find(candidate => candidate.visible && !candidate.disabled);
+    if (ready) return ready.element;
+    await sleep(250);
+  }
+  throw new Error(`No visible, enabled ${stage} Apply button appeared within ${timeout / 1000} seconds`);
+}
+
+function isFilterGroupList(modal) {
+  return Boolean(modal && [...modal.querySelectorAll('[data-test^="facet-group-"]')].some(isVisibleFilterElement));
+}
+
+async function waitForSelectedOption(sellerId, timeout = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    if (shouldStopAutomation) return false;
+    const option = [...document.querySelectorAll('input[data-test^="facet-checkbox-"]')]
+      .find(input => input.getAttribute("data-test") === `facet-checkbox-${sellerId}`);
+    if (option && option.checked) return true;
+    await sleep(200);
+  }
+  return false;
+}
+
+async function applySelectedFilter(sellerId, sellerName) {
+  logFilterDiagnostic("apply-start", { optionId: sellerId, optionName: sellerName });
+  for (let stage = 0; stage < 2; stage++) {
+    const stageName = stage === 0 ? "option" : "final";
+    let transitioned = false;
+    for (let attempt = 1; attempt <= 2 && !transitioned; attempt++) {
+      const button = await waitForEnabledFilterApply(stageName);
+      if (!button) {
+        if (stage === 0) throw new Error("Filter modal closed before Apply was clicked");
+        logFilterDiagnostic("apply-complete", { stageName });
+        return;
+      }
+      logFilterDiagnostic("apply-click", { stageName, attempt,
+        label: String(button.innerText || button.textContent || button.value || "").trim() });
+      scrollToAndClick(button);
+      reportAutomationProgress(`${stageName}-filter-apply-clicked`);
+      const start = Date.now();
+      while (Date.now() - start < 5000) {
+        if (shouldStopAutomation) throw new Error("Automation stopped");
+        await sleep(250);
+        const modal = getModal();
+        if (!modal) {
+          logFilterDiagnostic("apply-complete", { stageName, attempt });
+          return;
+        }
+        if (stage === 0 && isFilterGroupList(modal)) {
+          logFilterDiagnostic("apply-option-complete", { attempt });
+          transitioned = true;
+          break;
+        }
+      }
+      if (!transitioned) logFilterDiagnostic("apply-no-transition", { stageName, attempt });
+    }
+    if (!transitioned) throw new Error(`The ${stageName} Apply button did not change or close the filter panel`);
+  }
 }
 
 function parseContactText(text) {
-  const emailMatch = text.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
+  const emailMatch = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
   const phoneMatch = text.match(/(?:\+?1[\s.-]*)?(?:\(\d{3}\)|\d{3})[\s.-]*\d{3}[\s.-]*\d{4}\b/);
-  const businessNameMatch = text.match(/Legal Business Name:\s*([^H]+?)(?=Headquarters:|$)/);
+  const businessNameMatch = text.match(/Legal Business Name:\s*(.+?)(?=Headquarters:|$)/s);
   const headquartersMatch = text.match(/Headquarters:(.+?)(?:Contact|Partner Information|$)/s);
 
   const businessName = businessNameMatch ? businessNameMatch[1].trim() : "Not found";
@@ -1264,7 +1519,8 @@ function requestProductSellerDataOnce(productUrl, sellerId, sellerIndex, timeout
       clientRequestId,
       productUrl,
       sellerId,
-      sellerIndex
+      sellerIndex,
+      runId: keywordRunId
     }, (response) => {
       // Read lastError even if the direct result already settled this request.
       const runtimeError = chrome.runtime.lastError;
@@ -1293,12 +1549,20 @@ function requestProductSellerDataOnce(productUrl, sellerId, sellerIndex, timeout
 
 async function requestProductSellerData(productUrl, sellerId, sellerIndex, maxAttempts = 3) {
   let lastResult = null;
+  const requestGeneration = automationGeneration;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (shouldStopAutomation || requestGeneration !== automationGeneration) return { success: false, phase: "stopped-by-user", error: "Automation stopped" };
     reportAutomationProgress(`product-workflow-attempt-${attempt}`);
     console.log(`Product workflow attempt ${attempt}/${maxAttempts} for seller ${sellerId}`);
-    lastResult = await requestProductSellerDataOnce(productUrl, sellerId, sellerIndex);
+    const heartbeat = setInterval(() => reportAutomationProgress(`product-workflow-attempt-${attempt}`), 30000);
+    try {
+      lastResult = await requestProductSellerDataOnce(productUrl, sellerId, sellerIndex);
+    } finally {
+      clearInterval(heartbeat);
+    }
 
+    if (shouldStopAutomation || requestGeneration !== automationGeneration) return { success: false, phase: "stopped-by-user", error: "Automation stopped" };
     if (lastResult && lastResult.success === true) return lastResult;
     if (attempt < maxAttempts) {
       const phase = lastResult && lastResult.phase ? lastResult.phase : "unknown-phase";
@@ -1331,13 +1595,38 @@ async function collectSellerFromProductUrl(productUrl, sellerId, sellerIndex) {
     ? productResult.error
     : "Unknown product workflow error";
   console.error(`❌ Product workflow failed during ${failurePhase}: ${failureReason}`);
-  return {
-    id: sellerIndex,
-    unique_id: sellerId,
-    email: `Not found - Product ${failurePhase}`,
-    store_link: "Not found",
-    error_reason: failureReason
-  };
+  throw new Error(`Product ${failurePhase}: ${failureReason}`);
+}
+
+async function collectSellerFromProducts(productUrls, sellerId, sellerIndex) {
+  const candidates = productUrls.slice(0, 12);
+  if (candidates.length === 1) candidates.push(candidates[0]);
+  let lastReason = "No product links were available";
+  let missingSoldByCount = 0;
+  let missingSoldByResult = null;
+  for (let index = 0; index < candidates.length; index++) {
+    if (shouldStopAutomation) throw new Error("Automation stopped");
+    reportAutomationProgress(`checking-product-${index + 1}-of-${candidates.length}`);
+    try {
+      const seller = await collectSellerFromProductUrl(candidates[index], sellerId, sellerIndex);
+      if (seller && seller.sold_by_missing === true) {
+        missingSoldByCount++;
+        missingSoldByResult = seller;
+        logFilterDiagnostic("product-sold-by-recheck", { optionId: String(sellerId || ""), attempt: missingSoldByCount });
+        if (missingSoldByCount >= 2) return missingSoldByResult;
+        lastReason = seller.error_reason || "Sold & Shipped not found";
+        if (index + 1 < candidates.length) await sleep(2000);
+        continue;
+      }
+      if (seller && isUsableSellerEmail(String(seller.email || "").trim())) return seller;
+      lastReason = seller && (seller.error_reason || seller.email) || "Seller email was not available";
+    } catch (error) {
+      if (shouldStopAutomation) throw error;
+      lastReason = error && error.message ? error.message : String(error);
+    }
+    console.warn(`No usable seller email from product ${index + 1}/${candidates.length}: ${lastReason}`);
+  }
+  throw new Error(`Could not collect a seller email from ${candidates.length} product(s): ${lastReason}`);
 }
 
 async function saveApplyResumeCheckpoint(sellerId, sellerIndex, sellerName) {
@@ -1403,10 +1692,11 @@ async function resumeAutomationFromCheckpoint() {
     await sleep(1500);
     if (resumeGeneration !== automationGeneration || shouldStopAutomation) return;
 
-    const firstProductLink = await waitForFirstProductLink(30000);
+    const productLinks = await waitForProductLinks();
     if (resumeGeneration !== automationGeneration || shouldStopAutomation) return;
     let finalSellerData;
-    if (!firstProductLink) {
+    if (!productLinks.length) {
+      if (keywordRunIndex !== null) throw new Error(`No product appeared for ${checkpoint.sellerName} within 45 seconds`);
       console.warn(`No product appeared after navigation for ${checkpoint.sellerName}`);
       finalSellerData = {
         id: checkpoint.sellerIndex,
@@ -1416,8 +1706,8 @@ async function resumeAutomationFromCheckpoint() {
         error_reason: "No product appeared within 30 seconds after applying seller filter"
       };
     } else {
-      finalSellerData = await collectSellerFromProductUrl(
-        firstProductLink.href,
+      finalSellerData = await collectSellerFromProducts(
+        productLinks,
         checkpoint.sellerId,
         checkpoint.sellerIndex
       );
@@ -1426,10 +1716,16 @@ async function resumeAutomationFromCheckpoint() {
     if (resumeGeneration !== automationGeneration || shouldStopAutomation) return;
 
     await saveSellerData(finalSellerData);
+    await markSellerAttemptedForCurrentRun(checkpoint.sellerId);
+    reportAutomationProgress("seller-completed");
     console.log(`✅ Resumed seller completed: ${checkpoint.sellerName}`);
     continueRemainingSellers = true;
   } catch (error) {
     console.error("Resume after seller-filter navigation failed:", error);
+    if (keywordRunIndex !== null) {
+      await requestAutomationRestart(error && error.message ? error.message : String(error));
+      return;
+    }
     await saveSellerData({
       id: checkpoint.sellerIndex,
       unique_id: checkpoint.sellerId,
@@ -1452,6 +1748,11 @@ async function resumeAutomationFromCheckpoint() {
 }
 
 async function bootstrapAutomationContinuation() {
+  const ready = await chrome.runtime.sendMessage({ action: "KEYWORD_PAGE_READY" });
+  if (!ready || !ready.success) return;
+  keywordRunIndex = ready.index;
+  keywordRunId = ready.runId;
+  shouldStopAutomation = false;
   const checkpoint = await getStorage("automationResumeState", null);
   if (
     checkpoint &&
@@ -1463,27 +1764,8 @@ async function bootstrapAutomationContinuation() {
     return;
   }
 
-  const watchdog = await getStorage("automationWatchdog", null);
-  if (
-    !watchdog ||
-    watchdog.desiredRunning !== true ||
-    String(watchdog.categoryPathname || "") !== window.location.pathname ||
-    isAutomationRunning
-  ) {
-    return;
-  }
-
-  console.warn("🔁 Watchdog requested a full automation restart from the beginning", {
-    previousStage: watchdog.lastStage || "unknown",
-    restartCount: Number(watchdog.restartCount || 0)
-  });
-  if (watchdog.forceRestart === true) {
-    await setStorage({
-      automationAttemptedSellerIds: [],
-      automationResumeState: null
-    });
-  }
-  await updateAutomationWatchdog(true, "automatic-restart", false);
+  if (isAutomationRunning) return;
+  await updateAutomationWatchdog(true, "manual-start", false);
   await runAutomation();
 }
 
@@ -1521,11 +1803,19 @@ async function findSoldByLinkWithRetries(attempts = 5, delayMs = 2000, requestId
   for (let attempt = 1; attempt <= attempts; attempt++) {
     console.log(`[Product ${requestId}] [${attempt}/${attempts}] Looking for "Sold & shipped by"...`);
 
-    let soldByLink =
-      findInCurrentPage("Sold & shipped by", "a") ||
-      findInCurrentPage("Sold & shipped by", "button") ||
-      findInCurrentPage("Sold & shipped by") ||
-      findInCurrentPage("Sold and shipped by");
+    const mentionsSeller = (text) => /sold\s*(?:&|and)\s*shipped\s+by/i.test(String(text || ""));
+    let soldByLink = [...document.querySelectorAll("a, button")]
+      .find(element => mentionsSeller(element.textContent));
+    if (!soldByLink) {
+      const labels = [...document.querySelectorAll("span, p, div")]
+        .filter(element => mentionsSeller(element.textContent) && (element.textContent || "").length < 400)
+        .sort((a, b) => a.textContent.length - b.textContent.length);
+      for (const label of labels) {
+        const container = label.closest("a[href], button") || label.parentElement;
+        const anchor = container && (container.matches("a[href], button") ? container : container.querySelector("a[href], button"));
+        if (anchor) { soldByLink = anchor; break; }
+      }
+    }
 
     if (soldByLink) return soldByLink;
 
@@ -1611,15 +1901,17 @@ async function discoverSellerFromCurrentProduct(sellerId, sellerIndex, requestId
 
   if (!soldByLink) {
     console.warn("⚠️ 'Sold & shipped by' not found in new tab");
+    logFilterDiagnostic("product-sold-by-not-found", { optionId: String(sellerId || "") });
     return {
       retry: false,
       sellerData: {
         id: sellerIndex,
         unique_id: sellerId,
-        email: "Sold & shipped by not found",
+        email: "",
         store_link: "Not found",
-        error_reason: "Sold & shipped by not found",
-        status: "Found"
+        error_reason: "Sold & Shipped not found",
+        sold_by_missing: true,
+        status: "Completed"
       }
     };
   }
@@ -1709,14 +2001,14 @@ async function collectSellerEmails() {
     tempCheckboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
     console.log(`🔍 Attempt ${attempts + 1}: Found ${tempCheckboxes.length} seller checkboxes`);
 
-    if (tempCheckboxes.length > 1) { // More than just "Include out of stock"
+    if (filterSellerCheckboxes(tempCheckboxes).sellerCheckboxes.length > 0) {
       console.log("✅ Seller checkboxes loaded!");
       break;
     }
     attempts++;
   }
 
-  if (tempCheckboxes.length <= 1) {
+  if (!tempCheckboxes || filterSellerCheckboxes(tempCheckboxes).sellerCheckboxes.length === 0) {
     console.warn("⚠️ Seller checkboxes not found; closing and reopening the panel...");
     const closeButton = document.querySelector('[data-test="modal-close-button"]') ||
       document.querySelector('button[aria-label="close"], button[aria-label="Close"]');
@@ -1730,7 +2022,7 @@ async function collectSellerEmails() {
     }
     await sleep(1000);
     tempCheckboxes = document.querySelectorAll('input[data-test^="facet-checkbox-"]');
-    if (tempCheckboxes.length <= 1) {
+    if (filterSellerCheckboxes(tempCheckboxes).sellerCheckboxes.length === 0) {
       console.error("❌ No seller checkboxes found after reopening the panel.");
       await requestAutomationRestart("seller checkbox panel remained empty");
       return;
@@ -1842,7 +2134,6 @@ async function collectSellerEmails() {
 
     attemptedPendingCount++;
     const sellerName = getSellerBusinessName(input, sellerId);
-    await markSellerAttemptedForCurrentRun(sellerId);
     reportAutomationProgress(`processing-seller-${attemptedPendingCount}-of-${pendingSellerCount}`);
 
     try {
@@ -1856,6 +2147,7 @@ async function collectSellerEmails() {
       // Get the current checkbox from DOM (in case DOM changed)
       const currentCheckbox = document.querySelector(`[data-test="facet-checkbox-${sellerId}"]`);
       if (!currentCheckbox) {
+        if (keywordRunIndex !== null) throw new Error(`Seller checkbox missing: ${sellerName}`);
         console.error(`❌ Checkbox for ${sellerId} not found in DOM`);
         await saveSellerData({ id: i + 1, unique_id: sellerId, email: "Not found - Checkbox missing" });
         continue;
@@ -1864,24 +2156,20 @@ async function collectSellerEmails() {
       console.log("🖱️  Clicking: Seller checkbox");
       scrollToAndClick(currentCheckbox);
       await sleep(600);
+      if (shouldStopAutomation) return;
+      if (!await waitForSelectedOption(sellerId)) {
+        logFilterDiagnostic("option-selection-failed", { optionId: sellerId, optionName: sellerName });
+        throw new Error(`Could not select filter option ${sellerName}`);
+      }
+      logFilterDiagnostic("option-selected", { optionId: sellerId, optionName: sellerName });
 
-      console.log("🖱️  Clicking: Apply button (1st click)");
-      click('[data-test="@web/FacetModalButtons/ApplyButton"]');
-      reportAutomationProgress("first-filter-apply-clicked");
-      await sleep(1200);
-
-      // Target may perform a full category-page navigation on the final Apply.
-      // Persist enough state for the newly loaded content script to continue.
+      // Either Apply click can navigate away, so save before the first one.
       await saveApplyResumeCheckpoint(sellerId, i + 1, sellerName);
-      console.log("🖱️  Clicking: Apply button (2nd click)");
-      click('[data-test="@web/FacetModalButtons/ApplyButton"]');
-      reportAutomationProgress("second-filter-apply-clicked");
-      await sleep(2000);
+      await applySelectedFilter(sellerId, sellerName);
 
-      // Product results can load slowly after applying a seller. Wait for up to
-      // 30 seconds before deciding that this seller has no product to open.
-      const firstProductLink = await waitForFirstProductLink(30000);
-      if (!firstProductLink) {
+      const productLinks = await waitForProductLinks();
+      if (!productLinks.length) {
+        if (keywordRunIndex !== null) throw new Error(`No product appeared for ${sellerName} within 45 seconds`);
         console.warn(`⚠️ No product link for ${sellerName} after waiting 30 seconds`);
         await saveSellerData({
           id: i + 1,
@@ -1897,12 +2185,14 @@ async function collectSellerEmails() {
         continue;
       }
 
-      const productUrl = firstProductLink.href;
-      const finalSellerData = await collectSellerFromProductUrl(productUrl, sellerId, i + 1);
+      const finalSellerData = await collectSellerFromProducts(productLinks, sellerId, i + 1);
 
       if (finalSellerData) {
         await saveSellerData(finalSellerData);
       }
+      if (shouldStopAutomation) return;
+      await markSellerAttemptedForCurrentRun(sellerId);
+      reportAutomationProgress("seller-completed");
       await clearApplyResumeCheckpoint(sellerId);
 
       console.log(`✅ [${attemptedPendingCount}/${pendingSellerCount}] ${sellerName} completed`);
@@ -1939,12 +2229,19 @@ async function collectSellerEmails() {
         await sleep(3000);
         const retryPanel = await openFiltersAndSellerPanel();
         if (!retryPanel) {
+          if (keywordRunIndex !== null) throw new Error("Could not reopen the seller filters");
           console.error("❌ Still can't open filters after retries; skipping to the next seller...");
           continue;
         }
       }
 
     } catch (loopError) {
+      logFilterDiagnostic("option-processing-error", { optionId: sellerId, optionName: sellerName,
+        error: loopError && loopError.message ? loopError.message : String(loopError) });
+      if (keywordRunIndex !== null) {
+        if (!shouldStopAutomation) await requestAutomationRestart(loopError && loopError.message ? loopError.message : String(loopError));
+        return;
+      }
       // NEVER let any error stop the loop
       console.error(`❌ Unexpected error processing seller ${i + 1} (${sellerId}):`, loopError);
       console.log("⚠️ Saving error and continuing to next seller...");

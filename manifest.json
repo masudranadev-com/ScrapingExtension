@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Target Mail Hunter",
-  "version": "1.9.8",
+  "version": "1.10.9",
   "description": "Automates seller email collection from Target marketplace",
 
-  "permissions": ["activeTab", "alarms", "scripting", "storage"],
+  "permissions": ["activeTab", "alarms", "scripting", "storage", "unlimitedStorage"],
   "host_permissions": [
     "https://www.target.com/*",
     "http://192.168.0.250:43127/*",

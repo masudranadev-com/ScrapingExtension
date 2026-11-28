@@ -258,111 +258,78 @@ function syncSignalDockClientNames() {
   return signalDockSyncPromise;
 }
 
-async function ensureLatestContentScript(tabId) {
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"]
-    });
-    return true;
-  } catch (error) {
-    console.warn("Could not load the latest content script:", error);
-    return false;
-  }
-}
+const resetButton = document.getElementById("reset");
+const restartButton = document.getElementById("restart");
+const progress = document.getElementById("progress");
+const downloadDebugButton = document.getElementById("downloadDebug");
 
-async function sendSellerDiscoveryMessage() {
-  const [tab] = await chrome.tabs.query({
-    active: true,
-    currentWindow: true
-  });
+downloadDebugButton.addEventListener("click", async () => {
+  const { filterDiagnostics, keywordQueue, automationWatchdog } = await chrome.storage.local.get(["filterDiagnostics", "keywordQueue", "automationWatchdog"]);
+  const blob = new Blob([JSON.stringify({ keywordQueue, automationWatchdog, filterDiagnostics: filterDiagnostics || [] }, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "target-filter-debug.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+});
 
-  if (!tab || !tab.id || !tab.url || !tab.url.startsWith("https://www.target.com/")) {
+async function refreshProgress() {
+  const { keywordQueue } = await chrome.storage.local.get("keywordQueue");
+  if (!keywordQueue) {
+    progress.textContent = "Ready to start keyword 1 of 20";
+    startButton.disabled = false;
+    restartButton.disabled = true;
     return;
   }
-
-  await syncSignalDockClientNames();
-
-  const loaded = await ensureLatestContentScript(tab.id);
-  if (!loaded) return;
-
-  chrome.tabs.sendMessage(tab.id, { action: "COLLECT_SELLER_NAMES_V10" }, () => {
-    void chrome.runtime.lastError;
-  });
+  const label = `Keyword ${keywordQueue.index + 1} of 20: ${keywordQueue.keyword || ""}`;
+  progress.textContent = `${label} - ${keywordQueue.status}${keywordQueue.autoRestartCount ? ` (automatic restart ${keywordQueue.autoRestartCount}/3)` : ""}${keywordQueue.error ? `: ${keywordQueue.error}` : ""}`;
+  startButton.disabled = keywordQueue.status === "running" || keywordQueue.status === "completed";
+  restartButton.disabled = keywordQueue.status === "completed";
 }
 
-// Opening the extension popup starts the lightweight name/count scan.
-sendSellerDiscoveryMessage();
+async function sendQueueCommand(action, extra = {}) {
+  const response = await chrome.runtime.sendMessage({ action, ...extra });
+  if (!response || !response.success) throw new Error(response?.error || "The operation failed.");
+  await refreshProgress();
+}
 
-// Start/Stop button
 startButton.addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({
-    active: true,
-    currentWindow: true
-  });
-
-  if (!tab || !Number.isInteger(tab.id) || !tab.url || !tab.url.startsWith("https://www.target.com/")) {
-    alert("Open a Target category page before starting or stopping automation.");
-    return;
-  }
-
-  if (!isRunning) {
-    startButton.disabled = true;
-    startButton.textContent = "Syncing clients…";
-    const loaded = await ensureLatestContentScript(tab.id);
-    if (!loaded) {
-      startButton.disabled = false;
-      startButton.textContent = "▶ Start";
-      return;
+  startButton.disabled = true;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab || !Number.isInteger(tab.id) || !tab.url?.startsWith("https://www.target.com/")) {
+      throw new Error("Open a Target page before starting.");
     }
-
-    chrome.tabs.sendMessage(tab.id, { action: "START_AUTOMATION_V10" }, (response) => {
-      if (chrome.runtime.lastError || !response || response.success !== true) {
-        startButton.disabled = false;
-        startButton.textContent = "▶ Start";
-        const error = response && response.error
-          ? response.error
-          : (chrome.runtime.lastError ? chrome.runtime.lastError.message : "Automation could not be started");
-        alert(`Could not start automation.\n\n${error}`);
-        return;
-      }
-      window.close();
-    });
-  } else {
-    // Stop automation
-    chrome.tabs.sendMessage(tab.id, { action: "STOP_AUTOMATION_V10" }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn("Content script not available:", chrome.runtime.lastError.message);
-      }
-    });
-
-    // Change button back to Start
-    startButton.textContent = "▶ Start";
-    startButton.style.background = "#ffffff";
-    startButton.style.color = "#ff3b3b";
-    isRunning = false;
+    await sendQueueCommand("KEYWORD_START", { tabId: tab.id });
+  } catch (error) {
+    alert(error.message);
+    await refreshProgress();
   }
 });
 
-// View Data button
-viewDataButton.addEventListener("click", async () => {
-  await syncSignalDockClientNames();
-  chrome.tabs.create({
-    url: chrome.runtime.getURL('viewer.html')
-  });
+restartButton.addEventListener("click", async () => {
+  restartButton.disabled = true;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    await sendQueueCommand("KEYWORD_RESTART", { tabId: tab && tab.id });
+  } catch (error) {
+    alert(error.message);
+    await refreshProgress();
+  }
 });
 
-stopAllButton.addEventListener("click", () => {
-  stopAllButton.disabled = true;
-  stopAllButton.textContent = "Stopping…";
-  chrome.runtime.sendMessage({ action: "STOP_ALL_AUTOMATION_V1" }, (response) => {
-    const runtimeError = chrome.runtime.lastError;
-    if (runtimeError || !response || response.success !== true) {
-      stopAllButton.disabled = false;
-      stopAllButton.textContent = "Stop All";
-      alert(`Could not stop all tasks.\n\n${runtimeError ? runtimeError.message : (response && response.error) || "Unknown error"}`);
-      return;
-    }
-    window.close();
+viewDataButton.addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("viewer.html") }));
+
+for (const [button, action] of [[stopAllButton, "KEYWORD_STOP"], [resetButton, "KEYWORD_RESET"]]) {
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try { await sendQueueCommand(action); }
+    catch (error) { alert(error.message); }
+    finally { button.disabled = false; }
   });
+}
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.keywordQueue) void refreshProgress();
 });
+void refreshProgress();
